@@ -46,7 +46,7 @@ def validate(config: Any) -> dict[str, Any]:
     for value in (u["enabled"], u["allow_cli_refresh_probe"], u["authorization"]["authorized"], config["reset_scheduler"]["enabled"]):
         if type(value) is not bool:
             fail()
-    number(u["refresh_interval_minutes"], 0.5, 1440)
+    number(u["refresh_interval_minutes"], 5, 1440)
     number(u["fresh_seconds"], 1, 86400)
     number(u["reset_grace_seconds"], 0, 3600)
     number(config["clock"]["max_skew_seconds"], 30, 3600)

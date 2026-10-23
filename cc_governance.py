@@ -262,6 +262,11 @@ class Governance:
             elif data.get("fetched_at") and (time.time() - instant(data["fetched_at"]).timestamp() > self.policy()["fresh_seconds"]
                     or time.time() < instant(data["fetched_at"]).timestamp() - self.policy()["clock_skew_seconds"]):
                 data.update(state="STALE", stale=True, current_known=False)
+            elif data.get("fetched_at") and any(
+                    instant(data["fetched_at"]).timestamp() < data.get(key, {}).get("resets_at_epoch", float("inf")) <= time.time()
+                    for key in ("five_hour", "weekly")):
+                # A snapshot from before a reset cannot verify availability after it.
+                data.update(state="STALE", stale=True, current_known=False)
             return data
         except (BridgeError, ValueError, TypeError):
             return {"state": "UNKNOWN", "stale": True, "current_known": False, "last_error": "Usage cache unavailable"}
@@ -270,18 +275,38 @@ class Governance:
         from cc_bridge import FileLock, utc_iso
         with FileLock(self.root / "usage.lock", timeout=120):
             previous = self.usage()
+            query = self._load("usage-query.json")
+            # Migrate an existing cache conservatively without making an extra request.
+            if not query and previous.get("checked_at") and (previous.get("fetched_at") or previous.get("state") == "ENDPOINT_ERROR"):
+                last = instant(previous["checked_at"]).timestamp()
+                query = {"last_attempt_epoch": last, "next_allowed_epoch": last + self.policy()["refresh_seconds"]}
+            last = query.get("last_attempt_epoch", 0)
+            next_allowed = max(query.get("next_allowed_epoch", 0),
+                               last + self.policy()["refresh_seconds"] if last else 0)
             data = {k: previous[k] for k in ("five_hour", "weekly", "fetched_at", "last_valid_at") if k in previous}
             data.update(stale=True, current_known=False, checked_at=utc_iso(), timezone=self.config.detect_timezone(), reason=reason)
             if not self.config.load()["usage"]["enabled"]:
                 data.update(state="USAGE_DISABLED", stale=True, current_known=False)
             elif not self.authorized():
                 data.update(state="AUTH_REQUIRED", auth_state="AUTH_REQUIRED", last_error="Usage access needs explicit user consent")
+            elif time.time() < next_allowed:
+                # All callers share this persisted cooldown under the same kernel lock.
+                # Never reread credentials or send another request during the interval.
+                data = {**previous, "timezone": data["timezone"], "reason": reason,
+                        "refresh_deferred": True, "cache_reused": previous.get("state") == "VALID",
+                        "next_refresh_epoch": next_allowed,
+                        "next_refresh_at": datetime.fromtimestamp(next_allowed, timezone.utc).isoformat()}
             else:
                 try:
                     access = self._fresh_usage_access_token()
                     if not access:
                         data.update(state="AUTH_STALE", auth_state="AUTH_STALE", last_error="Claude authentication is unavailable or stale")
                     else:
+                        now = time.time()
+                        query = {"last_attempt_epoch": now,
+                                 "next_allowed_epoch": now + self.policy()["refresh_seconds"]}
+                        # Reserve the interval before networking, including failed/crashed requests.
+                        self._save("usage-query.json", query)
                         raw, server_date = fetch_usage(access)
                         # Whitelist only numeric utilization and parsed absolute resets.
                         windows = {}
@@ -304,12 +329,29 @@ class Governance:
                 except urllib.error.HTTPError as exc:
                     data.update(state="AUTH_STALE" if exc.code in (401, 403) else "ENDPOINT_ERROR",
                                 auth_state="AUTH_STALE" if exc.code in (401, 403) else "UNKNOWN",
-                                last_error="Usage endpoint rejected request")
+                                http_status=exc.code, last_error="Usage endpoint rejected request")
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    if retry_after:
+                        try:
+                            try:
+                                retry_epoch = time.time() + float(retry_after)
+                            except ValueError:
+                                retry_epoch = parsedate_to_datetime(retry_after).timestamp()
+                            if math.isfinite(retry_epoch):
+                                datetime.fromtimestamp(retry_epoch, timezone.utc)
+                                query["next_allowed_epoch"] = max(query.get("next_allowed_epoch", 0), retry_epoch)
+                                self._save("usage-query.json", query)
+                        except (ValueError, TypeError, OverflowError):
+                            pass
                 except (OSError, urllib.error.URLError):
                     data.update(state="ENDPOINT_ERROR", auth_state="UNKNOWN", last_error="Usage endpoint unavailable")
                 except Exception:
                     # Do not serialize exception text, response bodies, or request objects.
                     data.update(state="UNKNOWN", auth_state="UNKNOWN", last_error="Usage response or authentication is incompatible")
+                if query.get("next_allowed_epoch"):
+                    data.update(refresh_deferred=False, cache_reused=False,
+                                next_refresh_epoch=query["next_allowed_epoch"],
+                                next_refresh_at=datetime.fromtimestamp(query["next_allowed_epoch"], timezone.utc).isoformat())
             self._save("usage.json", data)
         self.reconcile_reminders(data)
         return data
@@ -471,7 +513,8 @@ class Governance:
                 with self.bridge._state_lock():
                     latest = self.bridge._record(record["task_id"])
                     if latest["status"] == "WAITING_USAGE_RESET":
-                        latest.update(last_usage=data, next_check_epoch=time.time() + config["reset_scheduler"]["retry_seconds"])
+                        latest.update(last_usage=data, next_check_epoch=max(
+                            time.time() + config["reset_scheduler"]["retry_seconds"], data.get("next_refresh_epoch", 0)))
                         write_json_atomic(path, latest)
         finally:
             guard.__exit__(None, None, None)

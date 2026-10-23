@@ -97,7 +97,11 @@ def get_cc_usage() -> dict[str, Any]:
 @mcp.tool()
 @boundary
 def refresh_cc_usage() -> dict[str, Any]:
-    """Fresh usage request after one-time user consent. Never grants consent itself."""
+    """Refresh when due; reuse valid cache during the shared >=5 minute cooldown.
+
+    Inspect refresh_deferred and next_refresh_at; never retry in a tight loop.
+    Requires prior user consent and never grants consent itself.
+    """
     return Bridge().governance.refresh_usage()
 
 

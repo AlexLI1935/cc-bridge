@@ -25,7 +25,7 @@ flowchart LR
 ## What you get
 
 - Durable tasks: inspect progress and full results after the calling agent disconnects.
-- Fresh five-hour **and** weekly usage checks before starting or resuming work.
+- Five-hour **and** weekly usage checks before starting or resuming work, with a bounded cache to avoid repeated requests.
 - Configurable capacity reserves: defaults stop automatic starts at **90% five-hour** or **95% weekly** utilization.
 - Persistent waiting and optional automatic continuation after a verified reset.
 - Completion events that another local agent can claim and acknowledge.
@@ -88,6 +88,15 @@ The authorization record contains no token. CC Bridge reads the local Claude
 login only after approval, holds the access credential in process memory and
 sends it only to the fixed Anthropic HTTPS usage endpoint. Redirects are refused.
 It never copies credentials into configuration, cache, logs, reports or MCP output.
+
+Usage requests are spaced out: **at least five minutes apart**, with a default of
+six minutes. Starting, checking and resuming a short task share the same valid
+cached reading rather than sending a burst of requests. The cache expires after
+seven minutes by default and cannot verify a reset that occurred after it was fetched.
+If it is stale, work waits for the next permitted successful refresh. Failed queries
+also count toward the interval; a longer server `Retry-After` takes precedence.
+The cooldown persists across restarts. Keep one `CC_BRIDGE_HOME` for the same account.
+`get_cc_usage` reads cache, and ordinary task-status polling sends no usage request.
 
 This integration uses the locally authenticated subscription session and **is not
 a documented stable public API contract**. Endpoint changes return unknown/stale
@@ -153,7 +162,7 @@ This is the authoritative, validated configuration, independent of the checkout.
 | `usage.weekly.max_utilization_pct` | `95` | Leave about 5% weekly capacity for emergencies |
 | Each window's `auto_wait_for_reset` | `true` | Persist a wait and arrange a later verification |
 | Each window's `auto_resume_after_reset` | `true` | Continue intended work after every gate passes again |
-| `usage.refresh_interval_minutes` | `6` | Low-frequency checks while a task is running; no background idle usage poller |
+| `usage.refresh_interval_minutes` | `6` | Shared minimum request interval and running refresh period; must be at least 5 minutes |
 | `usage.reset_grace_seconds` | `60` | Wait this long after the actual reset before checking again |
 | `timezone.mode` | `system` | Detect the operating system's timezone on startup and refresh |
 | `reset_scheduler.backend` | `system` | Windows Task Scheduler, with persisted caller-polling fallback |

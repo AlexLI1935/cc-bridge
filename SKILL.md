@@ -56,13 +56,29 @@ access/refresh tokens, passwords, cookies, or credential files into memory/confi
 
 ## Before every task
 
-Refresh through `refresh_cc_usage` (or CLI `usage-refresh`). Inspect five-hour and
-weekly utilization, remaining capacity and absolute reset times, and assess whether
-the intended workload fits. `get_cc_usage` reads cache only. Historical/stale data
-must never be presented as current availability.
+Inspect current five-hour and weekly usage, remaining capacity and absolute reset
+times before work. `get_cc_usage` reads cache only. Call `refresh_cc_usage` (or CLI
+`usage-refresh`) when a query is due; inspect `refresh_deferred`, `fetched_at` and
+`next_refresh_at`. Historical/stale data must never be presented as current availability.
+
+**Never send consecutive usage queries. Actual usage requests must be at least five
+minutes apart.** `usage.refresh_interval_minutes` is the shared minimum query interval
+and running refresh interval: default **6 minutes**, accepted range **5..1440**.
+CLI, MCP, submit, runner, resume and scheduler share a persisted cooldown within
+`CC_BRIDGE_HOME`; use the same home for the same account. Repeated refresh calls
+during that interval return the existing snapshot without reading credentials or
+contacting Anthropic. Reuse is allowed only while the snapshot remains valid under
+`usage.fresh_seconds` (default 420 seconds). A crossed reset invalidates a snapshot
+from before that reset. No valid snapshot means no launch until a permitted query
+succeeds. Never delete the cooldown or change homes to force a query.
+
+HTTP 429 and other failed requests also consume the query interval. Honor
+`next_refresh_at`; a longer service `Retry-After` takes precedence. Do not immediately
+retry failures or add usage refreshes to each task-status poll. Polling `get_cc_task`
+does not query usage. No cached response is proof that a reset has restored quota.
 
 Runtime `submit`/`run`/`resume` independently validates config, checks consent,
-refreshes usage, applies both ceilings and workspace policy, and uses the kernel
+refreshes when due or validates the bounded cache, applies both ceilings and workspace policy, and uses the kernel
 single-task lock. Remembering this skill is not the safety boundary.
 
 - Default five-hour ceiling: **90%**, aiming to leave 10% for manual work.
@@ -114,8 +130,9 @@ State survives bridge/agent/system restarts.
 
 The candidate is **max(actual reset instants of all blocking windows)**, followed
 by `usage.reset_grace_seconds` (default 60). Never use “now + five hours”. At due
-time, refresh both windows and run the gates again; if blocked, use the latest
-response to wait again. Scheduler/caller duplicates cannot reserve two runners
+time, obtain a snapshot fetched after the reset and run the gates again. If the
+query cooldown has not elapsed, keep waiting until a permitted refresh; if blocked,
+use the latest response to wait again. Scheduler/caller duplicates cannot reserve two runners
 for a cycle. The runner rechecks gates before invoking Claude.
 
 Events trace the sequence: TASK_WAITING_USAGE_RESET → USAGE_AVAILABLE → TASK_RESUMED,
