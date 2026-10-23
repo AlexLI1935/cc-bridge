@@ -292,26 +292,24 @@ read_only 仍只提供 Read/Glob/Grep，不能执行 Bash 或修改文件。已�
 本机对照中 `--tools` 没有导致 Bash 消失，因此不把这件事宣称为该版本的普遍缺陷。
 write 仍移除该参数以减少兼容风险，不做脆弱的精确版本封锁。
 
-## 时间怎么理解
+## 时间基准：绝对调度，自动观察本地显示偏移
 
-内部真值使用 UTC/epoch：reset、缓存年龄、冷却和一次性唤醒都按绝对时间处理。
-“五小时后”就是 `now_epoch + 18000`，不是先变成本地墙钟再调度。
-运行中任务超时采用单调时钟，避免调整系统墙钟延长执行时间；额度恢复仍以接口实际 reset 为准。
+每个 Bridge 进程第一次真正派发任务时，用一次不带凭据的 HTTPS HEAD 获取可信外部 UTC，
+读取本地墙钟，两者相减，保存为 `runtime/time-baseline.json` 中的
+`observed_utc_offset_minutes`。这不是查询订阅 Usage。该进程后续任务复用，不每轮 loop 重查。
+Bridge 重启、检测到 OS 时区/offset 改变、时钟跳变，或设置
+`config set timezone.refresh_observed_offset true` 时重新探测。失败显示 UNVERIFIED，
+回退到 OS/UTC 显示，不编造偏移，也不会借此绕过任务授权。
 
-显示时区优先级是：显式配置 > 有效 OS 时区 identity > UTC 回退。Windows 默认使用系统
-时区名称和系统规则；覆盖时使用 IANA identity 与 ZoneInfo/tzdata 规则。
-先用 `config set timezone.name '"Europe/Berlin"'` 设置名称，再将 `timezone.mode`
-设为 `"explicit"`；设回 `"system"` 就恢复操作系统默认值。迁移会补齐新字段，保留已有授权。
-换算未来时刻使用那个时刻的 DST 规则，不使用当前固定 offset。
+Usage reset、WAITING、缓存年龄、冷却和一次性唤醒仍以 UTC/epoch 为真值。
+“五小时后”保存 `now_epoch + 18000`；执行中超时采用单调时钟。
+自动本地显示使用 observed offset，不猜地理位置；OS 时区标签错了本身不会阻止额度恢复。
+但如果系统 UTC 确实偏离可信 UTC，仍报告 CLOCK_SKEW：绝对时钟不准时，不能假定 epoch
+调度可靠。Bridge 不偷偷改 OS 设置。
 
-启动诊断包含系统 UTC、OS 时区和本地时间；额度刷新取得可信 HTTPS Date 后，才有外部
-UTC 和偏差验证。没有外部参考时显示 UNVERIFIED。严重偏差报告 CLOCK_SKEW 并阻止启动
-和调度；可检测的墙钟/时区/UTC 不自洽报告 TIMEZONE_OR_CLOCK_MISCONFIGURED。
-如果错误时区配上被人为调整的时钟，系统内部可能仍自洽：此时只能发现外部 UTC 偏差，
-无法推断用户本来想用哪个时区。请修正 OS 时钟/时区或显式显示配置，Bridge 不猜地理位置，
-不用 IP 定位，也不替用户偷偷改系统设置。
-
-“每天当地 09:00”应保存时区、当地时间和周期规则，每次重新按 DST 规则计算下一次 UTC。
-`cc_time.next_local_occurrence` 提供这种换算：跳过不存在的当地时刻，重复时刻只取第一次。
-这是转换函数，不是新增周期任务服务；宿主负责保存规则并调度。绝对/相对一次性任务的
-触发瞬间不受显示时区和 DST 改变影响。
+IANA timezone 是本地周期计划、DST 的可选工具，不是 reset 的前置条件。
+可用 `timezone.name` 和 `timezone.mode=explicit` 显式选择 IANA 显示规则；
+默认 system 模式有 observed offset 时优先用它。IANA 规则需要 tzdata，MCP 依赖已包含。
+每天当地 09:00 应保存时区、当地时间和周期规则，每次重新换算下一次 UTC。
+`cc_time.next_local_occurrence` 提供换算，跳过不存在的时刻、重复时刻只取第一次；
+它不增加周期任务服务。Observed offset 只说明当前墙钟偏移，不预测未来 DST。

@@ -30,3 +30,5 @@ are prerequisites. Existing task data remains readable. No production installati
 is replaced by publishing this release.
 
 Write: constrained headless dontAsk, no --tools; no implicit bypass. Time: UTC/epoch truth, explicit IANA override, OS identity, UTC fallback and DST-aware local recurrence conversion.
+
+First-dispatch external UTC / wall-clock offset observation is cached per process; labels do not gate usage resets. Observed offset controls automatic display, never absolute reset epoch.

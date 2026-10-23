@@ -194,6 +194,11 @@ class Governance:
 
     def local_display(self, epoch: float) -> str:
         zone = self.config.load()["timezone"]
+        if zone["mode"] != "explicit":
+            from cc_observed import display
+            observed = display(epoch, self._load("time-baseline.json"))
+            if observed is not None:
+                return observed
         return local_time(epoch, zone["name"] if zone["mode"] == "explicit" else "UTC" if zone["detected_name"] == "UTC" else None)
 
     def policy(self) -> dict[str, Any]:
@@ -291,6 +296,7 @@ class Governance:
                     for key in ("five_hour", "weekly")):
                 # A snapshot from before a reset cannot verify availability after it.
                 data.update(state="STALE", stale=True, current_known=False)
+            data["local_time_baseline"] = self._load("time-baseline.json")
             for key in ("five_hour", "weekly"):
                 if isinstance(data.get(key), dict) and data[key].get("resets_at_epoch") is not None:
                     data[key]["resets_at_local"] = self.local_display(data[key]["resets_at_epoch"])
@@ -355,9 +361,7 @@ class Governance:
                         now = datetime.now(timezone.utc)
                         diagnosis = clock_diagnostic(now, now.astimezone(), data["timezone"].get("os_timezone") or data["timezone"]["local_timezone"], external, self.policy()["clock_skew_seconds"])
                         data["clock_diagnostic"] = diagnosis
-                        if diagnosis["status"] == "TIMEZONE_OR_CLOCK_MISCONFIGURED":
-                            data.update(state="TIMEZONE_OR_CLOCK_MISCONFIGURED", auth_state="VALID", last_error="OS local time and timezone are inconsistent; correct system configuration")
-                        elif skew is not None and abs(skew) > self.policy()["clock_skew_seconds"]:
+                        if skew is not None and abs(skew) > self.policy()["clock_skew_seconds"]:
                             data.update(state="CLOCK_SKEW", auth_state="VALID", clock_skew_seconds=skew,
                                         last_error="System clock differs significantly from the HTTPS server date")
                         else:
@@ -407,6 +411,8 @@ class Governance:
             error.usage = data
             raise error
         self.check_workspace(task)
+        from cc_observed import observe
+        data["local_time_baseline"] = observe(self)
         if self.blocked_windows(data):
             raise UsageBlocked(data)
         return data
@@ -608,7 +614,7 @@ class Governance:
 
     def _arm_scheduler(self) -> dict[str, Any]:
         from cc_bridge import read_json
-        if self._load("usage.json").get("state") in ("CLOCK_SKEW", "TIMEZONE_OR_CLOCK_MISCONFIGURED"):
+        if self._load("usage.json").get("state") == "CLOCK_SKEW":
             return {"delivery": "blocked", "scheduled": False, "last_error": self._load("usage.json").get("state")}
         config = self.config.load()
         rows = [read_json(p) for p in self.bridge.results.glob("*/result.json")]

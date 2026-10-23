@@ -11,6 +11,13 @@ from pathlib import Path
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def offline_external_time(monkeypatch):
+    import cc_observed
+    from datetime import datetime, timezone
+    monkeypatch.setattr(cc_observed, "fetch_external_utc", lambda: datetime.now(timezone.utc))
+
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -100,7 +107,7 @@ def fake_claude(tmp_path, monkeypatch):
     adapter.mkdir()
     import inspect, textwrap
     adapter_source = ("import sys\nsys.path.insert(0, " + repr(str(ROOT)) + ")\n"
-                      "from cc_governance import Governance\n" + textwrap.dedent(inspect.getsource(fake_usage))
+                      "from cc_governance import Governance\nimport cc_observed\nfrom datetime import datetime, timezone\ncc_observed.fetch_external_utc = lambda: datetime.now(timezone.utc)\n" + textwrap.dedent(inspect.getsource(fake_usage))
                       + "\nGovernance.refresh_usage = fake_usage\n")
     (adapter / "sitecustomize.py").write_text(adapter_source, encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", str(adapter))

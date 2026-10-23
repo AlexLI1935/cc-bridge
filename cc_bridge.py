@@ -718,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
             result = gov.verify_reminders(args.task_id)
         elif args.command == "environment":
             from cc_governance import timezone_info
-            result = {"success": True, "home": str(bridge.home), "claude_cli": claude_diagnostic(), **gov.config.detect_timezone()}
+            result = {"success": True, "home": str(bridge.home), "claude_cli": claude_diagnostic(), "local_time_baseline": gov._load("time-baseline.json"), **gov.config.detect_timezone()}
         elif args.command == "new":
             result = bridge.create_task(args.goal, args.workdir, Path(args.prompt_file).read_text(encoding="utf-8-sig"),
                                         mode=args.mode, complexity=args.complexity, model=args.model, effort=args.effort,

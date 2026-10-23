@@ -15,7 +15,7 @@ def defaults() -> dict[str, Any]:
             "weekly": {"max_utilization_pct": 95, "auto_wait_for_reset": True, "auto_resume_after_reset": True},
             "refresh_interval_minutes": 5, "fresh_seconds": 300, "reset_grace_seconds": 60,
             "allow_cli_refresh_probe": False},
-        "timezone": {"mode": "system", "name": None, "detected_name": None, "detected_at": None, "last_offset": None},
+        "timezone": {"mode": "system", "name": None, "refresh_observed_offset": False, "detected_name": None, "detected_at": None, "last_offset": None},
         "clock": {"max_skew_seconds": 300, "last_check": None},
         "reset_scheduler": {"enabled": True, "backend": "system", "retry_seconds": 300},
         "workspace": {"trusted_roots": []}}
@@ -53,6 +53,8 @@ def validate(config: Any) -> dict[str, Any]:
     number(config["reset_scheduler"]["retry_seconds"], 30, 86400)
     auth = u["authorization"]
     if auth["scope"] != "claude_subscription_usage" or config["timezone"]["mode"] not in ("system", "explicit"):
+        fail()
+    if type(config["timezone"]["refresh_observed_offset"]) is not bool:
         fail()
     zone = config["timezone"]["name"]
     if zone is not None:
@@ -92,6 +94,7 @@ def _upgrade_persisted(config: Any) -> Any:
     if isinstance(candidate, dict) and candidate.get("schema_version") == 1:
         if isinstance(candidate.get("timezone"), dict):
             candidate["timezone"].setdefault("name", None)
+            candidate["timezone"].setdefault("refresh_observed_offset", False)
         usage = candidate.get("usage")
         if isinstance(usage, dict):
             lifetime = usage.get("fresh_seconds")
@@ -145,7 +148,7 @@ class ConfigStore:
         # Consent and workspace trust use dedicated explicit-approval commands.
         if not (dotted.startswith("usage.five_hour.") or dotted.startswith("usage.weekly.") or dotted in (
                 "usage.enabled", "usage.refresh_interval_minutes", "usage.fresh_seconds", "usage.reset_grace_seconds",
-                "usage.allow_cli_refresh_probe", "timezone.mode", "timezone.name", "clock.max_skew_seconds",
+                "usage.allow_cli_refresh_probe", "timezone.mode", "timezone.name", "timezone.refresh_observed_offset", "clock.max_skew_seconds",
                 "reset_scheduler.enabled", "reset_scheduler.backend", "reset_scheduler.retry_seconds")):
             raise BridgeError("Use usage-authorize/revoke or trust-workspace/revoke-workspace for authorization changes")
         def change(c: dict[str, Any]) -> None:

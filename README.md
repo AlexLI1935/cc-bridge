@@ -317,34 +317,31 @@ not provide the required unattended command contract. No fragile exact-version b
 is imposed. See [permissions](https://code.claude.com/docs/en/permissions) and
 [CLI reference](https://code.claude.com/docs/en/cli-reference).
 
-## Time model
+## Time baseline: absolute scheduling, observed local display
 
-UTC/epoch is the absolute truth for reset instants, cache age, cooldown and one-shot
-wakeups. Relative requests such as “in five hours” mean `now_epoch + 18000`;
-running task timeouts use a monotonic clock, so wall-clock adjustments cannot extend
-the timeout. API reset timestamps remain authoritative for quota recovery.
+On the first real task dispatch in each Bridge process, an unauthenticated HTTPS
+HEAD request obtains a trusted external UTC Date. The bridge reads local wall time
+and records their difference as `observed_utc_offset_minutes` in
+`runtime/time-baseline.json`. This is not a subscription usage query. Subsequent
+tasks in that process reuse the baseline. Restart, detected OS timezone/offset
+change, a clock discontinuity or `config set timezone.refresh_observed_offset true`
+causes a new observation. A failed probe is UNVERIFIED and falls back to OS/UTC
+display; it does not invent an offset or grant permission to start tasks.
 
-Effective display timezone: explicit config > valid OS identity > UTC fallback.
-The native Windows identity uses OS rules; explicit overrides use IANA ZoneInfo
-rules (`tzdata` is included in MCP requirements). For example, set `timezone.name`
-to an IANA identity, then `timezone.mode` to `explicit`; return to `system` for the
-OS default. Existing configs migrate the new nullable name without losing consent.
-Future conversions use the target instant's DST rules, not today's offset.
+Reset, WAITING, cache age, cooldown and one-shot wakeups retain absolute UTC/epoch
+truth. “In five hours” means `now_epoch + 18000`; running timeouts use a monotonic
+clock. Automatic local display uses the observed current offset. A wrong OS label
+alone does not block quota recovery. Actual system UTC skew against trustworthy UTC
+still reports CLOCK_SKEW: an inaccurate absolute clock cannot safely drive epoch
+scheduling. Neither probe nor diagnostics guesses geography or changes the OS.
 
-System UTC, OS identity and local time are reported at startup; external UTC and
-clock skew become verified on usage refresh when its HTTPS Date is available.
-Without an external reference the diagnostic is UNVERIFIED, not evidence of correct
-clock time. CLOCK_SKEW blocks starts/scheduling. Mechanically inconsistent OS local
-time/identity/UTC reports TIMEZONE_OR_CLOCK_MISCONFIGURED. A wrong label plus an
-adjusted clock may be internally consistent: external UTC reveals skew but cannot
-reveal the intended timezone. Correct the OS clock/timezone or explicit display
-config; the bridge never guesses geography, uses IP geolocation, or changes the OS.
-
-Local recurring rules must retain timezone + local hour/minute + daily/weekly rule
-and resolve each occurrence to UTC again. `cc_time.next_local_occurrence` supplies
-this conversion: skipped DST times are skipped; repeated times use the first fold
-once. It does not add a recurring job service to the bridge. Hosts persisting such
-rules remain responsible for scheduling each occurrence. Absolute and relative
-one-shot instants never change with DST or a display timezone override.
+IANA identity is optional for local recurrences and DST, not a reset prerequisite.
+Explicit `timezone.name` plus `timezone.mode=explicit` can select IANA display rules;
+default `system` display uses the observed offset when available. Install tzdata
+for IANA rules (included in MCP dependencies). Daily 09:00 rules retain timezone,
+local hour/minute and recurrence, then resolve each occurrence anew using
+`cc_time.next_local_occurrence`; nonexistent times are skipped and repeated times
+use the first fold once. This helper does not add a recurring execution service.
+An observed offset describes the current wall clock, not future DST rules.
 
 Created and maintained by [Alex Li](https://github.com/AlexLI1935).
