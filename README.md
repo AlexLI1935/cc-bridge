@@ -1,5 +1,7 @@
 # CC Bridge
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 A lightweight local bridge that lets AI agents delegate coding tasks to Claude Code through MCP or CLI.
 
 CC Bridge gives an AI Agent a small, persistent task interface: start work, inspect
