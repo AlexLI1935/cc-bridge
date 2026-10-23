@@ -259,10 +259,10 @@ class Governance:
                 data.update(state="USAGE_DISABLED", stale=True, current_known=False)
             elif not self.authorized():
                 data.update(state="AUTH_REQUIRED", stale=True, current_known=False)
-            elif data.get("fetched_at") and (time.time() - instant(data["fetched_at"]).timestamp() > self.policy()["fresh_seconds"]
+            elif data.get("state") == "VALID" and data.get("fetched_at") and (time.time() - instant(data["fetched_at"]).timestamp() >= self.policy()["fresh_seconds"]
                     or time.time() < instant(data["fetched_at"]).timestamp() - self.policy()["clock_skew_seconds"]):
                 data.update(state="STALE", stale=True, current_known=False)
-            elif data.get("fetched_at") and any(
+            elif data.get("state") == "VALID" and data.get("fetched_at") and any(
                     instant(data["fetched_at"]).timestamp() < data.get(key, {}).get("resets_at_epoch", float("inf")) <= time.time()
                     for key in ("five_hour", "weekly")):
                 # A snapshot from before a reset cannot verify availability after it.
@@ -283,6 +283,8 @@ class Governance:
             last = query.get("last_attempt_epoch", 0)
             next_allowed = max(query.get("next_allowed_epoch", 0),
                                last + self.policy()["refresh_seconds"] if last else 0)
+            if previous.get("state") == "VALID" and previous.get("fetched_at"):
+                next_allowed = max(next_allowed, instant(previous["fetched_at"]).timestamp() + self.policy()["fresh_seconds"])
             data = {k: previous[k] for k in ("five_hour", "weekly", "fetched_at", "last_valid_at") if k in previous}
             data.update(stale=True, current_known=False, checked_at=utc_iso(), timezone=self.config.detect_timezone(), reason=reason)
             if not self.config.load()["usage"]["enabled"]:
@@ -354,7 +356,8 @@ class Governance:
                                 next_refresh_at=datetime.fromtimestamp(query["next_allowed_epoch"], timezone.utc).isoformat())
             self._save("usage.json", data)
         self.reconcile_reminders(data)
-        return data
+        # Use the persisted, revalidated cache as the single result after a refresh.
+        return self.usage()
 
     def gate(self, task: dict[str, Any]) -> dict[str, Any]:
         from cc_bridge import BridgeError

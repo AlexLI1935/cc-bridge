@@ -17,8 +17,8 @@
       "auto_wait_for_reset": true,
       "auto_resume_after_reset": true
     },
-    "refresh_interval_minutes": 6,
-    "fresh_seconds": 420,
+    "refresh_interval_minutes": 5,
+    "fresh_seconds": 300,
     "reset_grace_seconds": 60,
     "allow_cli_refresh_probe": false
   },

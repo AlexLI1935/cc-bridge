@@ -12,7 +12,7 @@ The original production code remains unchanged; private task history is not ship
 | Fresh start gate | Usage reporting, no mandatory fresh start gate | Absent | Required on submit, run and resume |
 | Capacity reserve policy | Calling workflow decisions | Absent | Validated configurable 90% / 95% defaults |
 | Stale-auth handling | CLI refresh probe | Absent | Status first; separately opt-in probe |
-| Usage refresh | Running periodic and terminal | Absent | Shared persisted query interval (default 6 minutes, minimum 5), bounded cache and Retry-After backoff |
+| Usage refresh | Running periodic and terminal | Absent | Shared persisted query interval (default/minimum 5 minutes), cache younger than 300 seconds and Retry-After backoff |
 | Reset reminder | Fixed-zone OS scheduling and caller-specific wake path | Absent | Absolute instants, OS timezone rules, Windows wakeup / persisted polling fallback |
 | Automatic continuation | User-controlled resume | Explicit resume | Persisted configurable auto-resume, fresh verification and cycle deduplication |
 | Completion events | Persistent pending / claim / done | Absent | Per-attempt/cycle generic local outbox, optional argv wake hook |

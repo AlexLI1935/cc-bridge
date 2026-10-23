@@ -26,7 +26,7 @@ from typing import Any
 if __name__ == "__main__":
     sys.modules.setdefault("cc_bridge", sys.modules[__name__])
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 SCHEMA_VERSION = 1
 MODES = ("read_only", "write")
 EFFORTS = ("low", "medium", "high")

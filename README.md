@@ -13,7 +13,7 @@ the actual reset and continue under your saved policy.
 Having a desktop application installed does not by itself prove that the CLI
 is available. CC Bridge orchestrates the local CLI; it is not a model API client.
 
-**v1.1.0 · MIT · Local first · MCP + CLI · Windows offline tests**
+**v1.1.1 · MIT · Local first · MCP + CLI · Windows offline tests**
 
 ```mermaid
 flowchart LR
@@ -90,13 +90,15 @@ sends it only to the fixed Anthropic HTTPS usage endpoint. Redirects are refused
 It never copies credentials into configuration, cache, logs, reports or MCP output.
 
 Usage requests are spaced out: **at least five minutes apart**, with a default of
-six minutes. Starting, checking and resuming a short task share the same valid
+five minutes. Starting, checking and resuming a short task share the same valid
 cached reading rather than sending a burst of requests. The cache expires after
-seven minutes by default and cannot verify a reset that occurred after it was fetched.
+five minutes and cannot verify a reset that occurred after it was fetched.
 If it is stale, work waits for the next permitted successful refresh. Failed queries
 also count toward the interval; a longer server `Retry-After` takes precedence.
 The cooldown persists across restarts. Keep one `CC_BRIDGE_HOME` for the same account.
 `get_cc_usage` reads cache, and ordinary task-status polling sends no usage request.
+Upgrading the old default policy migrates its six-minute/420-second settings to
+five minutes/300 seconds. Consent, workspace approvals and usage ceilings are preserved.
 
 This integration uses the locally authenticated subscription session and **is not
 a documented stable public API contract**. Endpoint changes return unknown/stale
@@ -162,7 +164,8 @@ This is the authoritative, validated configuration, independent of the checkout.
 | `usage.weekly.max_utilization_pct` | `95` | Leave about 5% weekly capacity for emergencies |
 | Each window's `auto_wait_for_reset` | `true` | Persist a wait and arrange a later verification |
 | Each window's `auto_resume_after_reset` | `true` | Continue intended work after every gate passes again |
-| `usage.refresh_interval_minutes` | `6` | Shared minimum request interval and running refresh period; must be at least 5 minutes |
+| `usage.refresh_interval_minutes` | `5` | Shared minimum request interval and running refresh period; must be at least 5 minutes |
+| `usage.fresh_seconds` | `300` | Reuse a valid reading only while younger than this limit; cannot exceed 300 seconds |
 | `usage.reset_grace_seconds` | `60` | Wait this long after the actual reset before checking again |
 | `timezone.mode` | `system` | Detect the operating system's timezone on startup and refresh |
 | `reset_scheduler.backend` | `system` | Windows Task Scheduler, with persisted caller-polling fallback |

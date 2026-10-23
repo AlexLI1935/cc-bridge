@@ -3,7 +3,7 @@ name: cc-bridge
 description: Deploy and operate CC Bridge to delegate repository review, debugging and implementation tasks to a local Claude Code CLI through MCP or CLI, with persisted usage ceilings, authorized workspaces, reset recovery and completion events. Use when Claude Code is the selected backend; skip ordinary explanations requiring no external coding agent.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
   author: Alex Li
   homepage: https://github.com/AlexLI1935
   repository: https://github.com/AlexLI1935/cc-bridge
@@ -63,12 +63,15 @@ times before work. `get_cc_usage` reads cache only. Call `refresh_cc_usage` (or 
 
 **Never send consecutive usage queries. Actual usage requests must be at least five
 minutes apart.** `usage.refresh_interval_minutes` is the shared minimum query interval
-and running refresh interval: default **6 minutes**, accepted range **5..1440**.
+and running refresh interval: default **5 minutes**, accepted range **5..1440**.
 CLI, MCP, submit, runner, resume and scheduler share a persisted cooldown within
 `CC_BRIDGE_HOME`; use the same home for the same account. Repeated refresh calls
 during that interval return the existing snapshot without reading credentials or
 contacting Anthropic. Reuse is allowed only while the snapshot remains valid under
-`usage.fresh_seconds` (default 420 seconds). A crossed reset invalidates a snapshot
+`usage.fresh_seconds` (default and maximum 300 seconds). Cache age **below 300 seconds**
+is eligible; at **300 seconds or later**, refresh when the cooldown permits, then
+reread the saved cache and use the updated result. A failed refresh never makes old
+data eligible. A crossed reset invalidates a snapshot
 from before that reset. No valid snapshot means no launch until a permitted query
 succeeds. Never delete the cooldown or change homes to force a query.
 
@@ -136,7 +139,7 @@ use the latest response to wait again. Scheduler/caller duplicates cannot reserv
 for a cycle. The runner rechecks gates before invoking Claude.
 
 Events trace the sequence: TASK_WAITING_USAGE_RESET → USAGE_AVAILABLE → TASK_RESUMED,
-then task completion/failure/cancellation events. Six-minute running checks are
+then task completion/failure/cancellation events. Five-minute running checks are
 configurable through `usage.refresh_interval_minutes`; a ceiling observed during
 execution stops the child for later continuation. Delayed provider reporting and
 work between checks can overshoot reserves; do not promise exact billing caps.

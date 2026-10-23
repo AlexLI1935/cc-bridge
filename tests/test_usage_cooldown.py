@@ -14,7 +14,7 @@ import cc_governance as g
 
 @pytest.fixture
 def guarded(tmp_path, monkeypatch):
-    clock = [time.time()]
+    clock = [float(int(time.time()))]
     monkeypatch.setattr(g.time, "time", lambda: clock[0])
     monkeypatch.setattr(cc, "utc_iso", lambda: datetime.fromtimestamp(clock[0], timezone.utc).isoformat())
     gov = cc.Bridge(tmp_path/"home").governance
@@ -38,6 +38,7 @@ def test_five_minute_floor_and_boundary(guarded):
     assert cached["fetched_at"] == first["fetched_at"]
     assert provider.call_count == credential.call_count == 1
     clock[0] += 1
+    assert gov.usage()["state"] == "STALE"
     assert not gov.refresh_usage()["refresh_deferred"]
     assert provider.call_count == 2
 
@@ -139,3 +140,53 @@ def test_revocation_overrides_valid_cached_usage(guarded):
     value = gov.refresh_usage()
     assert value["state"] == "AUTH_REQUIRED" and not value["current_known"]
     assert provider.call_count == credential.call_count == 1
+
+
+def test_legacy_defaults_migrate_without_losing_authorization(tmp_path):
+    from cc_config import defaults, ConfigStore
+    config = defaults()
+    config["usage"].update(fresh_seconds=420, refresh_interval_minutes=6)
+    config["usage"]["authorization"].update(authorized=True, authorized_at="2026-10-01T00:00:00Z")
+    config["usage"]["five_hour"]["max_utilization_pct"] = 85
+    path = tmp_path/"config.json"
+    path.write_text(json.dumps(config),encoding="utf-8")
+    migrated = ConfigStore(tmp_path).load()
+    assert migrated["usage"]["fresh_seconds"] == 300
+    assert migrated["usage"]["refresh_interval_minutes"] == 5
+    assert migrated["usage"]["authorization"] == config["usage"]["authorization"]
+    assert migrated["usage"]["five_hour"]["max_utilization_pct"] == 85
+    assert json.loads(path.read_text(encoding="utf-8")) == migrated
+
+
+def test_extended_cache_lifetime_rejected(guarded):
+    gov, _, _, _ = guarded
+    with pytest.raises(cc.BridgeError):
+        gov.config.set_value("usage.fresh_seconds", 301)
+
+
+@pytest.mark.parametrize("five,weekly", [(90,20),(10,95)])
+def test_cached_reading_still_obeys_both_ceilings(guarded, tmp_path, five, weekly):
+    gov, _, provider, _ = guarded
+    provider.return_value[0]["five_hour"]["utilization"] = five
+    provider.return_value[0]["seven_day"]["utilization"] = weekly
+    gov.refresh_usage()
+    with pytest.raises(g.UsageBlocked):
+        gov.gate({"mode":"read_only","workdir":str(tmp_path)})
+    assert provider.call_count == 1
+
+
+def test_expired_cache_refreshes_and_uses_latest_usage(guarded, tmp_path):
+    gov, clock, provider, _ = guarded
+    gov.refresh_usage()
+    provider.return_value[0]["five_hour"]["utilization"] = 90
+    provider.return_value[0]["seven_day"]["utilization"] = 95
+    clock[0] += 299
+    assert gov.gate({"mode":"read_only","workdir":str(tmp_path)})["five_hour"]["utilization"] == 10
+    assert provider.call_count == 1
+    clock[0] += 1
+    with pytest.raises(g.UsageBlocked):
+        gov.gate({"mode":"read_only","workdir":str(tmp_path)})
+    cached = gov.usage()
+    assert provider.call_count == 2
+    assert cached["five_hour"]["utilization"] == 90 and cached["weekly"]["utilization"] == 95
+    assert cached["fetched_at"] == cc.utc_iso()

@@ -122,7 +122,7 @@ def test_cli_help_and_complete_lifecycle(fake_claude, project, tmp_path):
         assert proc.returncode == expected, proc.stdout + proc.stderr
         return proc.stdout
     assert "submit" in cli("--help")
-    assert cli("--version").strip() == "1.1.0"
+    assert cli("--version").strip() == "1.1.1"
     created = json.loads(cli("new", "--goal", "Review", "--workdir", str(project), "--prompt-file", str(prompt)))
     task_id = created["task_id"]
     assert json.loads(cli("run", task_id))["status"] == "COMPLETED"

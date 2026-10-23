@@ -83,6 +83,8 @@ def test_failure_retains_last_valid_without_error_secrets(gov, monkeypatch, erro
     gov.authorize(True)
     good = gov.refresh_usage()
     # Simulate the next permitted query rather than bypassing the shared cooldown.
+    good["fetched_at"] = good["last_valid_at"] = (datetime.now(timezone.utc)-timedelta(seconds=301)).isoformat()
+    gov._save("usage.json", good)
     gov._save("usage-query.json", {"last_attempt_epoch": time.time()-361, "next_allowed_epoch": time.time()-1})
     monkeypatch.setattr(g, "fetch_usage", Mock(side_effect=error))
     bad = gov.refresh_usage()
@@ -221,6 +223,9 @@ def test_reminder_rechecks_usage_and_machine_timezone(gov,tmp_path,monkeypatch):
     write_json_atomic(gov.bridge._result_path(item["task_id"]),updated)
     assert gov.verify_reminders()["verified"] == []
     monkeypatch.setattr(g,"fetch_usage",lambda _: (response(10),None))
+    cached=gov._load("usage.json")
+    cached["fetched_at"]=cached["last_valid_at"]=(datetime.now(timezone.utc)-timedelta(seconds=301)).isoformat()
+    gov._save("usage.json",cached)
     gov._save("usage-query.json", {"last_attempt_epoch":time.time()-361,"next_allowed_epoch":time.time()-1})
     updated=gov.bridge.get_task(item["task_id"],full=True)
     updated["next_check_epoch"]=time.time()-1

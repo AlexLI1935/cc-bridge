@@ -13,7 +13,7 @@ def defaults() -> dict[str, Any]:
             "authorization": {"authorized": False, "authorized_at": None, "scope": "claude_subscription_usage"},
             "five_hour": {"max_utilization_pct": 90, "auto_wait_for_reset": True, "auto_resume_after_reset": True},
             "weekly": {"max_utilization_pct": 95, "auto_wait_for_reset": True, "auto_resume_after_reset": True},
-            "refresh_interval_minutes": 6, "fresh_seconds": 420, "reset_grace_seconds": 60,
+            "refresh_interval_minutes": 5, "fresh_seconds": 300, "reset_grace_seconds": 60,
             "allow_cli_refresh_probe": False},
         "timezone": {"mode": "system", "detected_name": None, "detected_at": None, "last_offset": None},
         "clock": {"max_skew_seconds": 300, "last_check": None},
@@ -47,7 +47,7 @@ def validate(config: Any) -> dict[str, Any]:
         if type(value) is not bool:
             fail()
     number(u["refresh_interval_minutes"], 5, 1440)
-    number(u["fresh_seconds"], 1, 86400)
+    number(u["fresh_seconds"], 1, 300)
     number(u["reset_grace_seconds"], 0, 3600)
     number(config["clock"]["max_skew_seconds"], 30, 3600)
     number(config["reset_scheduler"]["retry_seconds"], 30, 86400)
@@ -77,6 +77,22 @@ def validate(config: Any) -> dict[str, Any]:
     return config
 
 
+def _upgrade_persisted(config: Any) -> Any:
+    """Tighten legacy cache lifetime without losing consent or workspace settings."""
+    candidate = copy.deepcopy(config)
+    if isinstance(candidate, dict) and candidate.get("schema_version") == 1:
+        usage = candidate.get("usage")
+        if isinstance(usage, dict):
+            lifetime = usage.get("fresh_seconds")
+            if (not isinstance(lifetime, bool) and isinstance(lifetime, (int, float))
+                    and math.isfinite(lifetime) and 300 < lifetime <= 86400):
+                # Migrate the paired v1.1.0 defaults to the new five-minute policy.
+                if lifetime == 420 and usage.get("refresh_interval_minutes") == 6:
+                    usage["refresh_interval_minutes"] = 5
+                usage["fresh_seconds"] = 300
+    return validate(candidate)
+
+
 class ConfigStore:
     def __init__(self, home: Path):
         self.home = home
@@ -87,12 +103,16 @@ class ConfigStore:
         with FileLock(self.home / "runtime" / "config.lock"):
             if not self.path.exists():
                 write_json_atomic(self.path, defaults())
-            return validate(read_json(self.path))
+            stored = read_json(self.path)
+            config = _upgrade_persisted(stored)
+            if config != stored:
+                write_json_atomic(self.path, config)
+            return config
 
     def update(self, change: Any) -> dict[str, Any]:
         from cc_bridge import FileLock, read_json, write_json_atomic
         with FileLock(self.home / "runtime" / "config.lock"):
-            config = validate(read_json(self.path)) if self.path.exists() else defaults()
+            config = _upgrade_persisted(read_json(self.path)) if self.path.exists() else defaults()
             change(config)
             validate(config)
             write_json_atomic(self.path, config)
