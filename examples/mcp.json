@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cc-bridge": {
+      "command": "<absolute-path-to-venv-python>",
+      "args": ["<absolute-path-to-checkout>/mcp_server.py"]
+    }
+  }
+}

@@ -1,0 +1,2 @@
+-r requirements-mcp.txt
+pytest>=8,<10
