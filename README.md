@@ -2,62 +2,55 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A lightweight local bridge that lets AI agents delegate coding tasks to Claude Code through MCP or CLI.
+A local, durable and governed bridge that lets AI agents delegate coding tasks to Claude Code through MCP or CLI.
 
-CC Bridge gives an AI Agent a small, persistent task interface: start work, inspect
-status, read output, resume a session, or cancel it. Use it with Codex, another MCP
-client, or any Coding Agent that can invoke a local Python command.
+Give an agent a project directory and a task. CC Bridge checks the available
+Claude subscription capacity, starts your local Claude Code, and keeps its
+progress, result and report on disk. When capacity is low, work can wait for
+the actual reset and continue under your saved policy.
 
-**v1.0.0 · MIT · Python 3.10+ · Windows tested with a fake Claude executable**
+**Requires a working Claude Code CLI (`claude --version`) and Python 3.10+.**
+Having a desktop application installed does not by itself prove that the CLI
+is available. CC Bridge orchestrates the local CLI; it is not a model API client.
+
+**v1.1.0 · MIT · Local first · MCP + CLI · Windows offline tests**
 
 ```mermaid
 flowchart LR
     A[AI Agent] <-->|MCP / CLI| B[CC Bridge]
-    B <--> C[Local Claude Code]
+    B -->|capacity and workspace checks| C[Local Claude Code]
+    C -->|result and report| B
 ```
 
-## Installation
+## What you get
 
-Install and configure the [Claude Code CLI](https://code.claude.com/docs/en/setup)
-first. Confirm `claude --version` works and authenticate through Claude Code.
-CC Bridge uses that installation and its existing provider configuration.
+- Durable tasks: inspect progress and full results after the calling agent disconnects.
+- Fresh five-hour **and** weekly usage checks before starting or resuming work.
+- Configurable capacity reserves: defaults stop automatic starts at **90% five-hour** or **95% weekly** utilization.
+- Persistent waiting and optional automatic continuation after a verified reset.
+- Completion events that another local agent can claim and acknowledge.
+- One canonical report per attempt, checked against a task/attempt/hash receipt.
+- A kernel-backed single-task lock and explicit trusted roots for write work.
+- The same interface for Codex and other MCP clients, or agents that can run local commands.
+
+## Install and connect
+
+First install and authenticate [Claude Code](https://code.claude.com/docs/en/setup),
+then confirm `claude --version` works. Your existing provider/proxy configuration
+is inherited. Usage monitoring currently needs a file-based Claude subscription
+login; keychain-only or API-provider accounts may return `AUTH_STALE`/`UNKNOWN`.
 
 ```powershell
 git clone https://github.com/AlexLI1935/cc-bridge.git
 cd cc-bridge
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-mcp.txt
-.\.venv\Scripts\python.exe mcp_server.py
+.\.venv\Scripts\python.exe cc_bridge.py config show
 ```
 
-The last command starts a **stdio MCP server** and waits for a client; it does
-not open a web page. Usually your MCP client launches it using the configuration
-below. The core CLI needs only the Python standard library.
-
-## Why CC Bridge?
-
-Agent Delegation to a local CLI needs durable task IDs and observable outcomes.
-CC Bridge stores plain JSON task contracts, results, and per-attempt logs, so
-the calling agent can disconnect and inspect work later. There is no cloud
-service, database, routing framework, or account system to operate.
-
-## Features
-
-- Create tasks and run Claude Code in the foreground or background.
-- Query state and complete JSON/text results through CLI or MCP (Model Context Protocol).
-- Resume the exact saved Claude session UUID; cancel queued or running tasks.
-- Default to restricted file inspection; explicitly select write mode for AI Coding work.
-- Enforce one active task per runtime directory with OS-backed locks and atomic state writes.
-- Preserve separate logs and reports for each attempt, with UTC timestamps.
-
-## Quick start
-
-### MCP
-
-Add a server entry to your client's MCP configuration. Replace both placeholders
-with absolute paths; on Windows, escape backslashes in JSON or use forward slashes.
-The client-specific configuration location varies. A template is in
-[`examples/mcp.json`](examples/mcp.json).
+Register the server in your MCP client, replacing both placeholders with absolute
+paths. Windows JSON paths can use forward slashes. Configuration locations vary
+by client; [examples/mcp.json](examples/mcp.json) is a template.
 
 ```json
 {
@@ -70,203 +63,225 @@ The client-specific configuration location varies. A template is in
 }
 ```
 
-The server exposes exactly five tools:
+Running `python mcp_server.py` by hand starts a stdio service waiting for a client,
+so a quiet terminal is normal. The core CLI uses the Python standard library.
 
-| Tool | Purpose |
-| --- | --- |
-| `submit_cc_task` | Create a task and launch its runner immediately |
-| `get_cc_task` | Read state; `full=true` includes output, Claude JSON, and log paths |
-| `resume_cc_task` | Start another attempt with the saved session UUID and a continuation prompt |
-| `cancel_cc_task` | Cancel queued work or request running process termination |
-| `list_cc_tasks` | List recent tasks, with a configurable limit |
+## First-run permissions
 
-Example tool arguments (replace the workdir with an existing absolute directory):
+Usage inspection is **opt-in**. Ask the user before recording this permission:
+
+> Allow CC Bridge to read the local Claude Code authentication credential only
+> for retrieving Claude subscription usage information.
+
+After the user agrees, run the following with the bridge's Python interpreter:
+
+```powershell
+python cc_bridge.py usage-authorize --yes
+python cc_bridge.py usage-refresh
+```
+
+Without `--yes`, an interactive terminal asks for confirmation. Agents must obtain
+the user's consent before passing this flag. No MCP tool grants consent. Revoke
+it with `python cc_bridge.py usage-revoke`.
+
+The authorization record contains no token. CC Bridge reads the local Claude
+login only after approval, holds the access credential in process memory and
+sends it only to the fixed Anthropic HTTPS usage endpoint. Redirects are refused.
+It never copies credentials into configuration, cache, logs, reports or MCP output.
+
+This integration uses the locally authenticated subscription session and **is not
+a documented stable public API contract**. Endpoint changes return unknown/stale
+usage, never invented capacity. Historical values remain visibly stale, with
+`last_valid_at`; automatic work does not start from them.
+
+## Start a task
+
+With MCP, call `submit_cc_task` with a goal, an existing absolute `workdir`, and a
+prompt. It starts a background runner or returns `WAITING_USAGE_RESET` under the
+saved policy. Keep the returned ID and poll `get_cc_task`; `full=true` includes
+the final text, report validation and logs.
 
 ```json
 {
-  "goal": "Review the repository",
+  "goal": "Review this project",
   "workdir": "<absolute-project-directory>",
-  "prompt": "Find one concrete correctness issue. Cite the affected file and trigger. Do not modify files.",
+  "prompt": "Find one concrete correctness issue. Explain its trigger and affected file. Do not modify files.",
   "mode": "read_only"
 }
 ```
 
-Save the returned `task_id`, poll `get_cc_task`, then read the full result.
-Submission and resume return immediately; no second runner command is needed.
-If submission fails after creation, the error includes the created task ID so
-you can inspect it, submit it later through the CLI, or cancel it.
-
-### CLI
-
-Run these PowerShell commands from the checkout. The sample reviews the checkout
-itself; change `$project` to another repository's absolute path as needed.
+Or use PowerShell from the checkout:
 
 ```powershell
 $project = (Get-Location).Path
-$created = python .\cc_bridge.py new --goal "Review the repository" --workdir $project --prompt-file .\examples\review.md | ConvertFrom-Json
+$created = python cc_bridge.py new --goal "Review this project" --workdir $project --prompt-file examples/review.md | ConvertFrom-Json
 $taskId = $created.task_id
-python .\cc_bridge.py submit $taskId
-python .\cc_bridge.py status $taskId
-python .\cc_bridge.py result $taskId
-python .\cc_bridge.py list --limit 10
+python cc_bridge.py submit $taskId
+python cc_bridge.py status $taskId
+python cc_bridge.py result $taskId
+python cc_bridge.py list --limit 10
 ```
 
-For intended continuation of an ended session:
+`new` only saves a task. `submit` starts it in the background; `run $taskId` is the
+foreground alternative for a new task. No extra runner command is required for MCP.
+
+For changes, explicitly approve the project root first, then create a task with
+`--mode write` or MCP `mode="write"`:
 
 ```powershell
-python .\cc_bridge.py resume $taskId --prompt "Investigate the issue in more detail."
-python .\cc_bridge.py status $taskId
+python cc_bridge.py trust-workspace $project --yes
+python cc_bridge.py resume $taskId --prompt "Investigate the issue further."
+python cc_bridge.py cancel $taskId
+python cc_bridge.py revoke-workspace $project
 ```
 
-To stop queued or running work:
+Trust covers the selected directory and its descendants after resolving paths.
+Resume keeps the saved permission mode and exact session UUID. A task blocked
+before its first Claude launch can start later without a prior UUID. Interrupted
+work with no usable saved session is not silently replayed. Cancellation also
+cancels a waiting task; it does not undo edits already made.
 
-```powershell
-python .\cc_bridge.py cancel $taskId
-python .\cc_bridge.py status $taskId
-```
+## Your resource policy
 
-For foreground execution, use `run $taskId` in place of `submit` on a newly
-created task. `new --prior-session-id <uuid>` can explicitly start from an
-existing Claude session. `--mode write` enables repository changes.
-`--complexity normal|complex|hard` defaults to sonnet/medium, opus/medium, and
-opus/high respectively; `--model` and `--effort low|medium|high` override those choices.
-No choice depends on account usage. Use `new --max-runtime-minutes 30` to set a
-deadline (default 120, maximum 480 minutes).
+On first runtime startup, CC Bridge creates **`CC_BRIDGE_HOME/config.json`**.
+This is the authoritative, validated configuration, independent of the checkout.
+[config.example.json](config.example.json) shows the full schema.
 
-CLI commands return one JSON object. Exit codes: `0` successful operation,
-`1` foreground task did not complete successfully, `2` validation/operation error.
-`status`/`result` returning `success=true` means the read succeeded; always check
-`status` to determine the task outcome. `--help` and `--version` print plain text.
-
-## How it works and task lifecycle
-
-`new` writes a task and an initial `QUEUED` result. `submit` reserves the single
-execution slot and starts a detached Python runner, which invokes Claude with
-the prompt on stdin and JSON output redirected to attempt logs. A queued task
-is not automatically scheduled: submitting while another task is active returns
-an error. Separate CLI and MCP processes share state when `CC_BRIDGE_HOME` agrees.
-
-```text
-QUEUED -> RUNNING -> COMPLETED | FAILED | NEEDS_INPUT | WAITING_USAGE_RESET
-QUEUED -> CANCELLED
-RUNNING -> CANCELLING -> CANCELLED
-ended task + saved session UUID -> explicit resume -> QUEUED -> RUNNING
-```
-
-Resume retains the permission mode and uses `--resume <exact UUID>`, never an
-implicit "continue latest" session. It creates a new attempt without overwriting
-older logs. A task with no saved UUID cannot resume. Cancellation is cooperative:
-the runner stops its Claude process tree, then records `CANCELLED`; poll through
-`CANCELLING` before starting replacement work. Cancellation does not undo edits.
-An unexpectedly exited runner is recorded as failed when state is next read.
-
-## Permissions
-
-| Mode | Claude configuration | Intended use |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `read_only` (default) | `plan`, tools limited to `Read,Glob,Grep` | Review and investigation; no shell execution or tests |
-| `write` | `acceptEdits`, file tools and `Bash` | Authorized repository edits; shell commands remain permission-controlled |
+| `usage.five_hour.max_utilization_pct` | `90` | Stop automatic starts at 90%, aiming to leave 10% for manual work |
+| `usage.weekly.max_utilization_pct` | `95` | Leave about 5% weekly capacity for emergencies |
+| Each window's `auto_wait_for_reset` | `true` | Persist a wait and arrange a later verification |
+| Each window's `auto_resume_after_reset` | `true` | Continue intended work after every gate passes again |
+| `usage.refresh_interval_minutes` | `6` | Low-frequency checks while a task is running; no background idle usage poller |
+| `usage.reset_grace_seconds` | `60` | Wait this long after the actual reset before checking again |
+| `timezone.mode` | `system` | Detect the operating system's timezone on startup and refresh |
+| `reset_scheduler.backend` | `system` | Windows Task Scheduler, with persisted caller-polling fallback |
 
-CC Bridge never enables permission bypass. Both modes disable inherited MCP
-servers, hooks, and slash commands for the child session. Local/managed Claude
-permission policies still apply. A denied tool or a response beginning with
-`NEEDS_INPUT` produces `NEEDS_INPUT`; resolve the missing permission or decision
-before explicitly resuming. Headless execution cannot interactively approve a prompt.
+Both windows must pass: utilization must be **strictly less than** its ceiling.
+When both block, the next candidate is the later returned reset instant, plus
+the grace period. CC Bridge never substitutes “now + five hours”.
 
-These controls use [Claude Code's CLI flags](https://code.claude.com/docs/en/cli-reference)
-and [permission modes](https://code.claude.com/docs/en/permissions). They are not
-an OS sandbox. Claude can access data permitted by the local account and its
-configuration. Run only trusted projects; use an isolated account or environment
-when stronger filesystem or network isolation is required. The prompt instructs
-Claude to stay within the workdir and avoid deployments; this instruction alone
-is not a security boundary.
+At that time, it refreshes both windows again. If still blocked, it saves the new
+response and waits again. Unknown/authentication/error states cannot start work.
+Cycle IDs, transactional dispatch and the kernel lock prevent duplicate resume.
+Running tasks are stopped for a later continuation if a periodic check finds a
+ceiling reached. Provider reporting delays and work between checks can overshoot
+a reserve; these are governance limits, not a guaranteed real-time billing cap.
 
-## Configuration
-
-| Variable | Default and behavior |
-| --- | --- |
-| `CC_BRIDGE_HOME` | Windows: `%LOCALAPPDATA%/cc-bridge`; otherwise `~/.cc-bridge`. Created automatically on first operation. |
-| `CC_BRIDGE_CLAUDE_PATH` | Fallback executable path if `shutil.which("claude")` finds nothing on PATH. |
-
-For example, to isolate this checkout's data on Windows:
+Windows wakeups use a single named scheduled task per runtime home, an absolute
+reset instant, and `StartWhenAvailable` for missed checks after a restart. A refused
+registration is reported as `caller_polling`: keep polling `get_cc_pending` or run
+`python cc_bridge.py scheduler-tick`. Linux/macOS use that same persisted fallback.
+They do not autonomously wake without a caller or an externally configured scheduler.
+Disable automatic continuation in **both** window policies if you want manual resume.
 
 ```powershell
-$env:CC_BRIDGE_HOME = Join-Path $env:LOCALAPPDATA 'cc-bridge'
+python cc_bridge.py config show
+python cc_bridge.py config validate
+python cc_bridge.py config set usage.five_hour.max_utilization_pct 85
+python cc_bridge.py config set usage.weekly.auto_resume_after_reset false
 ```
 
-Use shell environment variables or your MCP client's server `env` object.
-[`.env.example`](.env.example) is a reference; `.env` is not loaded automatically.
-Normal provider and proxy environment variables are inherited by Claude.
-CC Bridge never opens Claude OAuth login files or queries account usage endpoints.
-Usage-limit detection only examines Claude's response; the bridge does not know
-reset times, schedule reminders, or resume automatically.
+You may edit `config.json` directly; malformed values fail closed. Values must be
+finite, thresholds must lie in 0..100, and only `system` timezone mode is supported.
+`usage.enabled=false` disables automatic task execution as well as credential
+inspection; it is **not** a quota-check bypass. Authorization and trusted roots have
+dedicated approval/revocation commands.
 
-Runtime layout:
+The original CLI refresh idea is retained behind
+`usage.allow_cli_refresh_probe=false`: normal stale-auth handling first tries the
+non-generative `claude auth status`, then rereads the credential. Status may not
+refresh every login. The separately enabled minimal model probe can use quota;
+otherwise unresolved authentication returns `AUTH_STALE`. No custom OAuth flow is used.
 
-```text
-CC_BRIDGE_HOME/
-  tasks/<task_id>/task.json
-  results/<task_id>/result.json
-  results/<task_id>/runner.log
-  results/<task_id>/attempt-N/{stdout.log,stderr.log,result.json,report.md}
-  runtime/{state.lock,runner.lock}
-```
+## Time, results and notifications
 
-Lock files persist by design; kernel locks release when processes close them.
-Do not delete lock files to force concurrency. Keep runtime data on a local disk.
+Time comes from the OS clock, OS timezone rules and the service's absolute reset
+timestamp. Model messages, language and IP location play no part. UTC/epoch is
+the scheduling truth; local reset text is for display. Conversion uses the rules
+at the **future reset instant**, including daylight saving changes. Startup and
+refresh update the detected timezone and pending local displays. Large clock
+differences from the HTTPS response Date produce `CLOCK_SKEW` and block scheduling.
 
-## Use with AI agents
+Read the final task status and check `report_validated`. Each attempt has one
+canonical `report.md` and a receipt binding its hash to the task and attempt.
+This proves that the returned report exists and matches; it does not prove that
+the model's proposed code is correct. Inspect files and run appropriate checks.
 
-[`SKILL.md`](SKILL.md) is the English integration guide for agents. It describes
-the exact MCP tools, CLI fallback, permission choices, and result verification.
-Register the server in an MCP-capable agent or invoke Python from a local tool.
-The bridge has no dependency on a particular calling agent.
+Events persist under `runtime/pending`. Use `get_cc_pending`, claim an exact
+`event_id` with `claim_cc_pending`, process the result, then call `done_cc_pending`.
+`first_claim` is true once; clients must handle interrupted claims deliberately.
+Events include `TASK_COMPLETED`, `TASK_FAILED`, `TASK_NEEDS_INPUT`,
+`TASK_WAITING_USAGE_RESET`, `USAGE_AVAILABLE`, `TASK_RESUMED` and `TASK_CANCELLED`.
 
-## Project structure and development
+Optionally set `CC_BRIDGE_WAKE_COMMAND` to a JSON argv array, such as
+`["my-local-notifier","--event"]`. The bridge appends event and task IDs, invokes
+it without a shell, and discards its output. Hooks are best effort; the durable
+outbox is the source of truth. No messaging service is built in.
 
-```text
-cc_bridge.py           Core task execution and CLI (standard library)
-mcp_server.py          Thin stdio MCP wrapper
-SKILL.md              Agent integration instructions
-examples/             Review prompt and MCP configuration template
-tests/                Offline tests with a generated fake Claude executable
-```
+## Interfaces and storage
+
+The original five MCP tools keep their names and arguments: `submit_cc_task`,
+`get_cc_task`, `resume_cc_task`, `cancel_cc_task`, `list_cc_tasks`. Added tools are
+`get_cc_usage`, `refresh_cc_usage`, `get_cc_pending`, `claim_cc_pending`,
+`done_cc_pending`. Cached usage never performs a refresh.
+
+Additional CLI commands: `usage`, `usage-refresh`, `usage-authorize`, `usage-revoke`,
+`config show|validate|set`, `environment`, `trust-workspace`, `revoke-workspace`,
+`pending`, `pending-claim`, `pending-done`, `schedule-reset-reminder`,
+`usage-reset-notify`, `scheduler-tick`. Run `--help` for task options, including
+model/effort overrides and execution deadlines.
+
+`status`/`result` returning `success=true` means the read succeeded; inspect
+`status` (`COMPLETED`, `FAILED`, `NEEDS_INPUT`, `WAITING_USAGE_RESET`, etc.) separately.
+CLI exit codes: 0 accepted operation, 1 unsuccessful foreground result, 2 operation error.
+
+| Environment | Purpose |
+| --- | --- |
+| `CC_BRIDGE_HOME` | Windows defaults to `%LOCALAPPDATA%/cc-bridge`; otherwise `~/.cc-bridge` |
+| `CC_BRIDGE_CLAUDE_PATH` | Fallback executable path when `claude` is absent from PATH |
+| `CLAUDE_CONFIG_DIR` | Claude's optional existing configuration directory for file-based authentication |
+
+Tasks live in `tasks/`, results and per-attempt logs in `results/`, cache/events/locks
+in `runtime/`, all under the runtime home. No runtime data belongs in Git. `.env`
+is not loaded automatically. Keep runtime storage on a private local disk.
+
+## Permissions and limitations
+
+- `read_only` exposes Read/Glob/Grep in plan mode; it cannot execute tests.
+- `write` uses acceptEdits and file/Bash tools, requires a trusted workspace, and
+  retains Claude permission checks. No permission bypass is provided. Child MCP
+  servers, hooks and slash commands are disabled. This is not an OS sandbox.
+- Subscription credentials are presently read from Claude's file-based store.
+  Keychain-only and non-subscription providers may be unavailable to monitoring.
+  Endpoint compatibility can change; unknown usage blocks automatic execution.
+- Windows subprocess/MCP behavior and scheduler XML are tested with mocks/fakes.
+  Live model execution, real-account usage and actual OS wakeups are not part of
+  the offline suite. Linux/macOS remain not officially verified.
+- Force-killing a runner may leave children; inspect failed tasks before continuing.
+  `cleanup_required=true` blocks more work until the process tree is manually
+  stopped and that flag is cleared in the latest result.
+- MCP is a trusted local stdio interface, without network authentication. Keep
+  task prompts/results private and do not expose the server as a network service.
+
+## Development and agent setup
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Tests exercise subprocess execution, persistence, concurrency, resume, cancellation,
-timeouts, CLI errors, and a real MCP stdio handshake/tool call. They never contact
-Claude or use paid model calls. On Windows the test fixture uses the launcher
-bundled with pip to create its fake executable. GitHub Actions runs the suite on Windows.
+Tests use fake Claude executables and mocked account responses; no paid model or
+real account is contacted. [SKILL.md](SKILL.md) is the agent deployment/operation
+contract. [Capability comparison](CAPABILITIES.md) records what was retained and restored.
 
-## Security and limitations
+v1.0 callers keep their MCP configuration and tool signatures. **Behavior is stricter**:
+usage consent, fresh valid capacity and write-workspace approval are now required.
+Existing tasks remain readable; no existing production installation is upgraded automatically.
 
-- The MCP server is a trusted **local stdio** interface with no remote authentication.
-  Anyone able to invoke it can request write tasks; do not expose it as a network service.
-- Task prompts, source excerpts, results, and logs may contain sensitive data.
-  Keep runtime storage private and outside the public checkout. Retention is manual.
-- Claude Code is a separate dependency under its own terms. A usable local login
-  or provider is required, and normal Claude usage charges/limits apply.
-- Windows native execution and MCP were tested using a fake executable. Real
-  Claude model execution was deliberately excluded from offline release tests.
-  Linux/macOS paths are implemented but not yet officially tested.
-- Use a recent CLI supporting the documented flags. No automatic CLI downgrade,
-  retry, scheduler, notification channel, or account usage monitor is included.
-- Force-killing the runner or shutting down the machine can interrupt work.
-  Inspect logs and any surviving child processes before resuming a failed attempt.
-- If process termination is refused by the OS, the result is `FAILED` with
-  `stage=cleanup` and `cleanup_required=true`; further execution is blocked.
-  Stop the recorded process tree manually, verify it is gone, then clear that
-  flag in the task's latest `result.json`. Never clear it while work is still running.
+## License and author
 
-## License
-
-[MIT](LICENSE), copyright (c) 2026 Alex Li. No third-party source code is bundled;
-the MCP SDK and test dependencies retain their respective licenses.
-
-## Author
+[MIT](LICENSE), copyright (c) 2026 Alex Li.
 
 Created and maintained by [Alex Li](https://github.com/AlexLI1935).

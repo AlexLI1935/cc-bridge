@@ -11,7 +11,8 @@ from cc_bridge import Bridge, BridgeError
 
 mcp = FastMCP("cc-bridge", instructions=(
     "Delegate local repository tasks to Claude Code. Submit starts a background runner. "
-    "Poll get_cc_task; full=true includes the final output. Default mode is read_only. "
+    "Poll get_cc_task; full=true includes the final output. Usage ceilings are enforced from config.json. "
+    "A blocked task persists in WAITING_USAGE_RESET and follows its configured resume policy. Default mode is read_only. "
     "Select write only for authorized changes. Resume only when continuation is intended."
 ))
 
@@ -22,7 +23,8 @@ def boundary(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any
         try:
             return func(*args, **kwargs)
         except (BridgeError, OSError, ValueError, TypeError) as exc:
-            return {"success": False, "error": {"type": "bridge_error", "message": str(exc)}}
+            return {"success": False, "error": {"type": "bridge_error", "message": str(exc)},
+                    "usage": getattr(exc, "usage", None)}
     return wrapped
 
 
@@ -82,6 +84,53 @@ def cancel_cc_task(task_id: str) -> dict[str, Any]:
 def list_cc_tasks(limit: int = 20) -> dict[str, Any]:
     """List the newest local tasks, including status and attempt count (limit 1..1000)."""
     return Bridge().list_tasks(limit)
+
+
+
+@mcp.tool()
+@boundary
+def get_cc_usage() -> dict[str, Any]:
+    """Read cached five-hour/weekly subscription usage. Stale data is historical only."""
+    return Bridge().governance.usage()
+
+
+@mcp.tool()
+@boundary
+def refresh_cc_usage() -> dict[str, Any]:
+    """Fresh usage request after one-time user consent. Never grants consent itself."""
+    return Bridge().governance.refresh_usage()
+
+
+@mcp.tool()
+@boundary
+def get_cc_pending(include_done: bool = False) -> dict[str, Any]:
+    """Read durable completion events and verify due persisted reset reminders."""
+    return Bridge().governance.pending(include_done)
+
+
+def _event_id(bridge: Bridge, task_id: str | None, event_id: str | None) -> str:
+    if event_id:
+        return event_id
+    rows = [r for r in bridge.governance.pending()["pending"] if r["task_id"] == task_id]
+    if len(rows) != 1:
+        raise BridgeError("Specify event_id when there is not exactly one unfinished task event")
+    return rows[0]["event_id"]
+
+
+@mcp.tool()
+@boundary
+def claim_cc_pending(task_id: str | None = None, event_id: str | None = None) -> dict[str, Any]:
+    """Atomically claim one event; first_claim is true once. Prefer exact event_id."""
+    bridge = Bridge()
+    return bridge.governance.change_event(_event_id(bridge, task_id, event_id))
+
+
+@mcp.tool()
+@boundary
+def done_cc_pending(task_id: str | None = None, event_id: str | None = None) -> dict[str, Any]:
+    """Idempotently mark a handled event done. Claimed events survive client restarts."""
+    bridge = Bridge()
+    return bridge.governance.change_event(_event_id(bridge, task_id, event_id), done=True)
 
 
 if __name__ == "__main__":

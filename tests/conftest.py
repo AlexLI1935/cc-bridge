@@ -85,6 +85,29 @@ def fake_claude(tmp_path, monkeypatch):
     monkeypatch.setenv("CC_BRIDGE_HOME", str(tmp_path / "bridge data"))
     monkeypatch.setenv("CC_BRIDGE_FAKE_CAPTURE", str(tmp_path / "capture.json"))
     monkeypatch.delenv("CC_BRIDGE_FAKE_ACTION", raising=False)
+    # Mock only the provider for legacy lifecycle tests, including detached
+    # subprocesses. This adapter lives in temporary test storage, never core.
+    from cc_governance import Governance
+    def fake_usage(self, reason="explicit"):
+        from cc_governance import timezone_info, reset_fields
+        from datetime import datetime, timezone, timedelta
+        reset = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+        window = {"utilization": 10.0, "remaining": 90.0, **reset_fields(reset)}
+        return {"state": "VALID", "current_known": True, "stale": False,
+                "five_hour": window, "weekly": window, "timezone": timezone_info()}
+    monkeypatch.setattr(Governance, "refresh_usage", fake_usage)
+    adapter = tmp_path / "provider-adapter"
+    adapter.mkdir()
+    import inspect, textwrap
+    adapter_source = ("import sys\nsys.path.insert(0, " + repr(str(ROOT)) + ")\n"
+                      "from cc_governance import Governance\n" + textwrap.dedent(inspect.getsource(fake_usage))
+                      + "\nGovernance.refresh_usage = fake_usage\n")
+    (adapter / "sitecustomize.py").write_text(adapter_source, encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(adapter))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    Bridge().governance.authorize(True)
+    Bridge().governance.config.set_value("reset_scheduler.backend", "caller_polling")
+    Bridge().governance.trust(str(tmp_path), confirmed=True)
     return executable
 
 

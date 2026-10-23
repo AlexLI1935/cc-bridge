@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "usage": {
+    "enabled": true,
+    "authorization": {
+      "authorized": false,
+      "authorized_at": null,
+      "scope": "claude_subscription_usage"
+    },
+    "five_hour": {
+      "max_utilization_pct": 90,
+      "auto_wait_for_reset": true,
+      "auto_resume_after_reset": true
+    },
+    "weekly": {
+      "max_utilization_pct": 95,
+      "auto_wait_for_reset": true,
+      "auto_resume_after_reset": true
+    },
+    "refresh_interval_minutes": 6,
+    "fresh_seconds": 420,
+    "reset_grace_seconds": 60,
+    "allow_cli_refresh_probe": false
+  },
+  "timezone": {
+    "mode": "system",
+    "detected_name": null,
+    "detected_at": null,
+    "last_offset": null
+  },
+  "clock": {
+    "max_skew_seconds": 300,
+    "last_check": null
+  },
+  "reset_scheduler": {
+    "enabled": true,
+    "backend": "system",
+    "retry_seconds": 300
+  },
+  "workspace": {
+    "trusted_roots": []
+  }
+}

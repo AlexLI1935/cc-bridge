@@ -16,3 +16,6 @@ logs/
 *.log
 .DS_Store
 Thumbs.db
+
+# Runtime configuration belongs under CC_BRIDGE_HOME, not the checkout.
+config.json

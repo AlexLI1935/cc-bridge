@@ -20,7 +20,8 @@ def test_real_stdio_handshake_and_task_lifecycle(fake_claude, project):
                     assert initialized.serverInfo.name == "cc-bridge"
                     listed = await session.list_tools()
                     assert {t.name for t in listed.tools} == {
-                        "submit_cc_task", "get_cc_task", "resume_cc_task", "cancel_cc_task", "list_cc_tasks"}
+                        "submit_cc_task", "get_cc_task", "resume_cc_task", "cancel_cc_task", "list_cc_tasks",
+                        "get_cc_usage", "refresh_cc_usage", "get_cc_pending", "claim_cc_pending", "done_cc_pending"}
                     async def call(name, args):
                         reply = await session.call_tool(name, args)
                         assert not reply.isError, reply

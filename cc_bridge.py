@@ -23,7 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.0.0"
+if __name__ == "__main__":
+    sys.modules.setdefault("cc_bridge", sys.modules[__name__])
+
+__version__ = "1.1.0"
 SCHEMA_VERSION = 1
 MODES = ("read_only", "write")
 EFFORTS = ("low", "medium", "high")
@@ -226,6 +229,8 @@ def build_command(task: dict[str, Any], resume_session_id: str | None = None) ->
            "--disallowedTools", "mcp__*"]
     if resume_session_id:
         cmd += ["--resume", validate_session_id(resume_session_id)]
+    elif task.get("_new_session_id"):
+        cmd += ["--session-id", validate_session_id(task["_new_session_id"])]
     if task["mode"] == "read_only":
         cmd += ["--permission-mode", "plan", "--tools", "Read,Glob,Grep"]
     else:
@@ -302,6 +307,8 @@ class Bridge:
         self.tasks = self.home / "tasks"
         self.results = self.home / "results"
         self.runtime = self.home / "runtime"
+        from cc_governance import Governance
+        self.governance = Governance(self)
 
     def _state_lock(self) -> FileLock:
         return FileLock(self.runtime / "state.lock")
@@ -358,6 +365,9 @@ class Bridge:
             self._task(task_id)
             record = self._record(task_id)
         if full:
+            if record.get("report_path"):
+                from cc_governance import canonical_report_committed
+                record["report_validated"] = canonical_report_committed(Path(record["report_path"]).parent, record)
             return {"success": True, **record}
         keys = ("task_id", "status", "attempt", "session_id", "model", "effort", "mode",
                 "summary", "stage", "started_at", "ended_at", "report_path")
@@ -408,15 +418,26 @@ class Bridge:
         return {"success": True, "task_id": task_id, "status": "QUEUED", "runner_pid": proc.pid}
 
     def submit_task(self, task_id: str) -> dict[str, Any]:
+        from cc_governance import UsageBlocked
         with self._state_lock():
             task = validate_task(self._task(task_id))
             record = self._record(task_id)
             if record["status"] != "QUEUED" or record.get("dispatched"):
                 raise BridgeError("Task already dispatched or finished; use resume for a saved session")
-            return self._dispatch(task, record, None)
+        try:
+            usage = self.governance.gate(task)
+        except UsageBlocked as exc:
+            return self.governance.wait_task(task_id, exc.usage, before_launch=True)
+        with self._state_lock():
+            record = self._record(task_id)
+            if record["status"] != "QUEUED" or record.get("dispatched"):
+                raise BridgeError("Task is no longer available for submission")
+            result = self._dispatch(task, record, None)
+            return {**result, "usage": usage}
 
     def resume_task(self, task_id: str, prompt: str = "Continue the existing task.", *,
                     model: str | None = None, effort: str | None = None) -> dict[str, Any]:
+        from cc_governance import UsageBlocked
         if not isinstance(prompt, str) or not prompt.strip():
             raise BridgeError("Resume prompt must not be empty")
         with self._state_lock():
@@ -426,11 +447,23 @@ class Bridge:
                 raise BridgeError("Manual process cleanup is required before resuming this task")
             if record["status"] not in RESUMABLE_STATUSES:
                 raise BridgeError(f"Cannot resume a task in {record['status']}")
-            validate_session_id(record.get("session_id", ""))
+            if record.get("session_id"):
+                validate_session_id(record["session_id"])
+            elif not record.get("waiting_before_launch"):
+                raise BridgeError("session_id must be an exact saved Claude session UUID")
             task["model"], task["effort"] = route_model(task["complexity"], model or task["model"], effort or task["effort"])
-            self._guard_active(task_id)
             write_json_atomic(self._task_path(task_id), task)
-            return self._dispatch(task, record, prompt)
+        try:
+            usage = self.governance.gate(task)
+        except UsageBlocked as exc:
+            return self.governance.wait_task(task_id, exc.usage, prompt, record.get("waiting_before_launch", False))
+        with self._state_lock():
+            record = self._record(task_id)
+            if record["status"] not in RESUMABLE_STATUSES or record.get("dispatched"):
+                raise BridgeError("Task is no longer available for resume")
+            result = self._dispatch(task, record, prompt if record.get("session_id") else None)
+        self.governance.event({**record, "status": "QUEUED"}, "TASK_RESUMED")
+        return {**result, "usage": usage}
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         with self._state_lock():
@@ -438,14 +471,17 @@ class Bridge:
             record = self._record(task_id)
             if record["status"] == "CANCELLED":
                 return {"success": True, "task_id": task_id, "status": "CANCELLED"}
-            if record["status"] not in ACTIVE_STATUSES:
+            if record["status"] not in (*ACTIVE_STATUSES, "WAITING_USAGE_RESET"):
                 raise BridgeError(f"Cannot cancel a task in {record['status']}")
             # A queued child has not entered run_task; its launch ID cannot revive a cancellation.
             state = "CANCELLING" if record["status"] in ("RUNNING", "CANCELLING") else "CANCELLED"
-            record.update(status=state, cancel_requested=True, summary="Cancellation requested")
+            record.update(status=state, cancel_requested=True, auto_resume=False, auto_wait=False, summary="Cancellation requested")
             if state == "CANCELLED":
                 record["ended_at"] = utc_iso()
             write_json_atomic(self._result_path(task_id), record)
+        if state == "CANCELLED":
+            self.governance.refresh_usage("cancel")
+            self.governance.event(record)
         return {"success": True, "task_id": task_id, "status": state}
 
     def run_task(self, task_id: str, launch_id: str | None = None) -> dict[str, Any]:
@@ -470,23 +506,43 @@ class Bridge:
             proc: subprocess.Popen[Any] | None = None
             attempt_dir = self.results / task_id / f"attempt-{record['attempt']}"
             payload = None
+            from cc_governance import UsageBlocked, UsageRefresher, ensure_report, canonical_report_committed
+            refresher = UsageRefresher(self.governance)
             try:
                 attempt_dir.mkdir(parents=True)
+                record["pre_usage"] = self.governance.gate(task)
+                if not session_id:
+                    record["session_id"] = str(uuid.uuid4())
+                    task["_new_session_id"] = record["session_id"]
+                    with self._state_lock():
+                        write_json_atomic(self._result_path(task_id), record)
                 command = build_command(task, session_id)
+                refresher.start()
                 with tempfile.TemporaryFile() as input_file, (attempt_dir / "stdout.log").open("wb") as out, (attempt_dir / "stderr.log").open("wb") as err:
                     input_file.write(build_prompt(task, continuation).encode("utf-8"))
                     input_file.seek(0)
-                    proc = subprocess.Popen(command, cwd=task["workdir"], env=build_claude_env(task),
-                                            stdin=input_file, stdout=out, stderr=err,
-                                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                                            start_new_session=os.name != "nt")
+                    # Serialize the final permission check with consent revocation.
+                    with FileLock(self.runtime / "usage.lock"):
+                        current = self.governance.config.load()
+                        if not current["usage"]["enabled"] or not current["usage"]["authorization"]["authorized"]:
+                            raise BridgeError("Usage authorization was revoked before launch")
+                        self.governance.check_workspace(task)
+                        if self.governance.blocked_windows(record["pre_usage"]):
+                            raise UsageBlocked(record["pre_usage"])
+                        proc = subprocess.Popen(command, cwd=task["workdir"], env=build_claude_env(task),
+                                                stdin=input_file, stdout=out, stderr=err,
+                                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                                                start_new_session=os.name != "nt")
                     deadline = time.monotonic() + task["max_runtime_minutes"] * 60
-                    cancelled = timed_out = False
+                    cancelled = timed_out = usage_paused = False
                     while proc.poll() is None:
                         with self._state_lock():
                             cancelled = self._record(task_id).get("cancel_requested", False)
                         timed_out = time.monotonic() >= deadline
-                        if cancelled or timed_out:
+                        snapshot = refresher.latest
+                        usage_paused = bool(snapshot and snapshot.get("state") == "VALID"
+                                            and self.governance.blocked_windows(snapshot))
+                        if cancelled or timed_out or usage_paused:
                             stop_process(proc)
                             break
                         time.sleep(0.1)
@@ -498,16 +554,28 @@ class Bridge:
                     state, stage = "CANCELLED", "cancel"
                 elif timed_out:
                     state, stage = "FAILED", "timeout"
+                elif usage_paused:
+                    state, stage = "WAITING_USAGE_RESET", "usage"
+                    record["blocked_usage"] = refresher.latest
                 candidate = (payload or {}).get("session_id")
                 if candidate:
                     record["session_id"] = validate_session_id(candidate)
-                record.update(status=state, stage=stage, exit_code=proc.returncode,
+                record.update(status=state, stage=stage, exit_code=proc.returncode, waiting_before_launch=False,
                               summary=str((payload or {}).get("result") or stderr or "No result returned")[:4000],
                               result=(payload or {}).get("result"), claude_result=payload)
+            except UsageBlocked as exc:
+                if proc is None:
+                    record["session_id"] = session_id
+                record.update(status="WAITING_USAGE_RESET", stage="usage", blocked_usage=exc.usage,
+                              waiting_before_launch=True, summary="Usage ceiling reached before launch")
             except Exception as exc:
+                if proc is None:
+                    record["session_id"] = session_id
                 record.update(status="FAILED", stage="bridge", summary=f"{type(exc).__name__}: {exc}")
             finally:
                 # A failure after spawning must not leave an untracked paid child running.
+                refresher.stop()
+                record["post_usage"] = self.governance.refresh_usage("terminal")
                 cleanup_error = None
                 try:
                     if proc is not None:
@@ -526,15 +594,28 @@ class Bridge:
                                       stdout_path=str(attempt_dir / "stdout.log"),
                                       stderr_path=str(attempt_dir / "stderr.log"))
                         report_path = attempt_dir / "report.md"
-                        report_path.write_text(str(record.get("result") or record["summary"]) + "\n", encoding="utf-8")
-                        record["report_path"] = str(report_path)
+                        try:
+                            ensure_report(attempt_dir, record)
+                            if not canonical_report_committed(attempt_dir, record):
+                                raise BridgeError("Current-attempt report validation failed")
+                            record["report_path"] = str(report_path)
+                            record["report_validated"] = True
+                        except (BridgeError, OSError) as exc:
+                            record.update(status="FAILED", stage="report", report_path=None,
+                                          report_validated=False, summary=str(exc))
                         write_json_atomic(attempt_dir / "result.json", record)
                         write_json_atomic(self._result_path(task_id), record)
+            if record["status"] == "WAITING_USAGE_RESET":
+                usage = record.pop("blocked_usage", None) or record["post_usage"]
+                if usage.get("state") == "VALID":
+                    return self.governance.wait_task(task_id, usage, continuation, record.get("waiting_before_launch", False))
+            self.governance.event(record)
             return {"success": record["status"] == "COMPLETED", **record}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cc_bridge", description="CC Bridge: local Claude Code delegation")
+    parser.add_argument("--home", help="override runtime storage for this invocation")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
     new = sub.add_parser("new", help="create a task without starting Claude")
@@ -560,14 +641,73 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--effort", choices=EFFORTS)
     listing = sub.add_parser("list")
     listing.add_argument("--limit", type=int, default=20)
+    for name in ("usage", "usage-refresh", "usage-revoke", "environment", "scheduler-tick"):
+        sub.add_parser(name)
+    for name in ("usage-authorize",):
+        node = sub.add_parser(name)
+        node.add_argument("--yes", action="store_true", help="record explicit user consent already obtained")
+    for name in ("trust-workspace", "revoke-workspace"):
+        node = sub.add_parser(name)
+        node.add_argument("path")
+        node.add_argument("--yes", action="store_true")
+    node = sub.add_parser("pending")
+    node.add_argument("--include-done", action="store_true")
+    for name in ("pending-claim", "pending-done"):
+        node = sub.add_parser(name)
+        node.add_argument("event_id")
+    for name in ("schedule-reset-reminder", "usage-reset-notify"):
+        node = sub.add_parser(name)
+        node.add_argument("task_id")
+    config = sub.add_parser("config", help="inspect or validate non-secret runtime configuration")
+    config_sub = config.add_subparsers(dest="config_action", required=True)
+    config_sub.add_parser("show")
+    config_sub.add_parser("validate")
+    setting = config_sub.add_parser("set")
+    setting.add_argument("key")
+    setting.add_argument("value", help="JSON value, e.g. 95 or false")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    bridge = Bridge()
     try:
-        if args.command == "new":
+        bridge = Bridge(Path(args.home) if args.home else None)
+        gov = bridge.governance
+        if args.command == "config":
+            if args.config_action == "set":
+                result = gov.config.set_value(args.key, json.loads(args.value))
+                gov.arm_scheduler()
+            else:
+                result = gov.config.load()
+            result = {"success": True, "config": result}
+        elif args.command == "scheduler-tick":
+            result = gov.verify_reminders()
+        elif args.command == "usage":
+            result = gov.usage()
+        elif args.command == "usage-refresh":
+            result = gov.refresh_usage()
+        elif args.command == "usage-revoke":
+            result = gov.revoke()
+        elif args.command == "usage-authorize":
+            confirmed = args.yes
+            if not confirmed and sys.stdin.isatty():
+                confirmed = input("Allow local Claude authentication access solely for subscription usage? [y/N] ").lower() == "y"
+            result = gov.authorize(confirmed)
+        elif args.command in ("trust-workspace", "revoke-workspace"):
+            result = gov.trust(args.path, revoke=args.command == "revoke-workspace", confirmed=args.yes)
+        elif args.command == "pending":
+            result = gov.pending(args.include_done)
+        elif args.command in ("pending-claim", "pending-done"):
+            result = gov.change_event(args.event_id, done=args.command == "pending-done")
+        elif args.command == "schedule-reset-reminder":
+            result = gov.schedule_reset_reminder(args.task_id)
+        elif args.command == "usage-reset-notify":
+            validate_task_id(args.task_id)
+            result = gov.verify_reminders(args.task_id)
+        elif args.command == "environment":
+            from cc_governance import timezone_info
+            result = {"success": True, "home": str(bridge.home), **timezone_info()}
+        elif args.command == "new":
             result = bridge.create_task(args.goal, args.workdir, Path(args.prompt_file).read_text(encoding="utf-8-sig"),
                                         mode=args.mode, complexity=args.complexity, model=args.model, effort=args.effort,
                                         max_runtime_minutes=args.max_runtime_minutes, prior_session_id=args.prior_session_id)
@@ -583,10 +723,12 @@ def main(argv: list[str] | None = None) -> int:
             result = bridge.list_tasks(args.limit)
         else:
             result = bridge.get_task(args.task_id, full=args.command == "result")
+        result.setdefault("success", True)
         print(json.dumps(result, ensure_ascii=True))
         return 0 if result.get("success") else 1
     except (BridgeError, OSError, ValueError, TypeError) as exc:
-        print(json.dumps({"success": False, "error": {"type": "bridge_error", "message": str(exc)}}))
+        print(json.dumps({"success": False, "error": {"type": "bridge_error", "message": str(exc)},
+                          "usage": getattr(exc, "usage", None)}))
         return 2
 
 

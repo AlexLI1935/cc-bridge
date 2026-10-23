@@ -6,11 +6,12 @@ import pytest
 import cc_bridge as cc
 
 
-def test_import_has_no_runtime_side_effects(tmp_path, monkeypatch):
+def test_first_runtime_initializes_config_without_tasks(tmp_path, monkeypatch):
     monkeypatch.setenv("CC_BRIDGE_HOME", str(tmp_path / "uncreated"))
     bridge = cc.Bridge()
     assert bridge.home == (tmp_path / "uncreated").resolve()
-    assert not bridge.home.exists()
+    assert (bridge.home / "config.json").is_file()
+    assert not bridge.tasks.exists()
 
 
 def test_default_home(monkeypatch):
