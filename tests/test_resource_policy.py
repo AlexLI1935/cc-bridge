@@ -191,3 +191,17 @@ def test_windows_schedule_uses_absolute_instant_and_explicit_home(bridge,monkeyp
     arguments=tree.find('.//t:Arguments',ns).text
     assert 'scheduler-tick' in arguments and '--home' in arguments and str(bridge.home) in arguments
     assert tree.find('.//t:StartWhenAvailable',ns).text=='true'
+
+
+@pytest.mark.parametrize("key",["usage.five_hour.auto_wait_for_reset","usage.enabled","reset_scheduler.enabled"])
+def test_current_config_can_disable_existing_waits(bridge,project,monkeypatch,key):
+    task_id=make(bridge,project)
+    monkeypatch.setattr(g.Governance,"refresh_usage",lambda self,reason="explicit":snapshot(90,10))
+    bridge.submit_task(task_id)
+    due(bridge,task_id)
+    bridge.governance.config.set_value(key,False)
+    refresh=Mock(side_effect=AssertionError("disabled wait must not inspect account"))
+    monkeypatch.setattr(g.Governance,"refresh_usage",refresh)
+    assert bridge.governance.verify_reminders()["resumed"]==[]
+    assert not bridge.governance.arm_scheduler()["scheduled"]
+    refresh.assert_not_called()

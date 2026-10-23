@@ -405,16 +405,18 @@ class Governance:
     def reconcile_reminders(self, usage: dict[str, Any]) -> None:
         from cc_bridge import read_json, write_json_atomic
         changed = False
+        waiting = False
         with self.bridge._state_lock():
             for path in self.bridge.results.glob("*/result.json"):
                 record = read_json(path)
                 if record.get("status") == "WAITING_USAGE_RESET" and record.get("reset_epoch"):
+                    waiting = True
                     new_local = local_time(record["reset_epoch"])
                     new_zone = usage["timezone"]["local_timezone"]
                     changed |= record.get("reset_local") != new_local or record.get("local_timezone") != new_zone
                     record.update(reset_local=new_local, local_timezone=new_zone)
                     write_json_atomic(path, record)
-        if changed:
+        if changed or waiting:
             self.arm_scheduler()
 
     def verify_reminders(self, task_id: str | None = None) -> dict[str, Any]:
@@ -431,9 +433,13 @@ class Governance:
             config = self.config.load()
             for path in self.bridge.results.glob("*/result.json"):
                 record = read_json(path)
-                if (record.get("status") != "WAITING_USAGE_RESET" or not record.get("auto_wait")
+                if (record.get("status") != "WAITING_USAGE_RESET"
                         or record.get("next_check_epoch", float("inf")) > time.time()
                         or task_id and record["task_id"] != task_id):
+                    continue
+                config = self.config.load()
+                if (not config["usage"]["enabled"] or not config["reset_scheduler"]["enabled"]
+                        or not all(config["usage"][w]["auto_wait_for_reset"] for w in record["blocked_windows"])):
                     continue
                 data = self.refresh_usage("reset_verification")
                 config = self.config.load()
@@ -441,7 +447,7 @@ class Governance:
                     checked.append(record["task_id"])
                     self.event(record, "USAGE_AVAILABLE")
                     windows = record["blocked_windows"]
-                    auto = record.get("auto_resume") and all(config["usage"][w]["auto_resume_after_reset"]
+                    auto = all(config["usage"][w]["auto_resume_after_reset"]
                         and config["usage"][w]["auto_wait_for_reset"] for w in windows)
                     if auto and config["usage"]["enabled"] and config["reset_scheduler"]["enabled"]:
                         try:
@@ -526,8 +532,9 @@ class Governance:
         config = self.config.load()
         rows = [read_json(p) for p in self.bridge.results.glob("*/result.json")]
         due = [r["next_check_epoch"] for r in rows if r.get("status") == "WAITING_USAGE_RESET"
-               and r.get("auto_wait") and r.get("next_check_epoch")]
-        if not due or not config["reset_scheduler"]["enabled"]:
+               and r.get("next_check_epoch") and all(config["usage"][w]["auto_wait_for_reset"]
+                   for w in r.get("blocked_windows", []))]
+        if not due or not config["reset_scheduler"]["enabled"] or not config["usage"]["enabled"]:
             return {"delivery": "disabled", "scheduled": False}
         epoch = min(due)
         if os.name != "nt" or config["reset_scheduler"]["backend"] == "caller_polling":
