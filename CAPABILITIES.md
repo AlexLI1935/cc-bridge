@@ -28,3 +28,5 @@ The five public 1.0 MCP tool signatures are retained. Execution policy is delibe
 stricter: explicit usage consent, current known capacity and trusted write workspaces
 are prerequisites. Existing task data remains readable. No production installation
 is replaced by publishing this release.
+
+Write: constrained headless dontAsk, no --tools; no implicit bypass. Time: UTC/epoch truth, explicit IANA override, OS identity, UTC fallback and DST-aware local recurrence conversion.

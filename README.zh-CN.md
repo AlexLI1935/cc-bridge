@@ -12,7 +12,7 @@ CC Bridge 是 AI 编程助手和 Claude Code 之间的一座本地桥。你可�
 确认命令可用。仅仅装了某个桌面应用，并不代表这个命令一定存在。Bridge 负责组织本地
 CLI 的执行，不是直接调用 Claude 模型 API 的客户端。
 
-**v1.1.1 · MIT 开源 · 本地优先 · MCP + 命令行 · Windows 离线测试**
+**v1.1.2 · MIT 开源 · 本地优先 · MCP + 命令行 · Windows 离线测试**
 
 ```mermaid
 flowchart LR
@@ -191,7 +191,7 @@ python cc_bridge.py config set usage.weekly.auto_resume_after_reset false
 ```
 
 也可以直接编辑 `config.json`，但修改后要校验。非法配置会阻止执行；阈值只能是
-0..100 的有限数字，时区模式目前只支持 `system`。`usage.enabled=false` 会同时停用
+0..100 的有限数字，时区模式支持 `system` 或 `explicit`。`usage.enabled=false` 会同时停用
 凭据读取和自动任务执行，不是绕过额度检查的开关。授权和目录信任使用专门命令管理。
 
 认证过期时，程序先尝试不生成模型内容的 `claude auth status`，再重新读取登录文件。
@@ -248,7 +248,7 @@ CLI 退出码：0 表示操作已接受，1 表示前台任务没有成功完成
 ## 权限与目前的限制
 
 - 默认 `read_only` 只提供 Read/Glob/Grep，使用 plan 模式，不能运行测试命令。
-- `write` 使用 acceptEdits，需要信任工作目录，仍受 Claude 权限规则约束，不提供权限绕过。
+- `write` 使用 dontAsk，需要信任工作目录，仍受 Claude 权限规则约束，不提供权限绕过。
   子会话的 MCP、hooks 和斜杠命令会关闭。这些控制不等于操作系统沙箱。
 - 额度查询目前依赖文件型订阅认证；钥匙串专用登录或其他服务商可能不支持。
   未知额度会阻止自动执行，而不是假装充足。
@@ -278,3 +278,40 @@ v1.0 的 MCP 配置和五个核心工具签名可继续沿用，**执行条件�
 采用 [MIT License](LICENSE)，版权归 2026 Alex Li 所有。
 
 由 [Alex Li](https://github.com/AlexLI1935) 创建和维护。
+
+## 后台写代码：批准目录后，可以正常跑开发命令
+
+write 模式使用 `dontAsk`，预先允许 Read、Glob、Grep、Edit、Write、NotebookEdit、Bash，
+不传 `--tools`。批准 workspace 后，CC 可以像普通编程 Agent 一样读写、运行 Python、
+测试和本地 git 命令；其他需要审批的操作直接拒绝，不会等人点击。部署、远程推送和
+系统变更仍不属于默认任务合同。没有自动 bypass；Bash 的工具授权也不是操作系统沙箱，
+不能保证命令在物理上无法访问目录外。请只批准可信项目和你打算执行的任务。
+
+read_only 仍只提供 Read/Glob/Grep，不能执行 Bash 或修改文件。已有的系统/用户 deny
+规则继续有效。`environment` 会显示实际 CLI 版本。隔离验证过 Windows CLI 2.1.286；
+本机对照中 `--tools` 没有导致 Bash 消失，因此不把这件事宣称为该版本的普遍缺陷。
+write 仍移除该参数以减少兼容风险，不做脆弱的精确版本封锁。
+
+## 时间怎么理解
+
+内部真值使用 UTC/epoch：reset、缓存年龄、冷却和一次性唤醒都按绝对时间处理。
+“五小时后”就是 `now_epoch + 18000`，不是先变成本地墙钟再调度。
+运行中任务超时采用单调时钟，避免调整系统墙钟延长执行时间；额度恢复仍以接口实际 reset 为准。
+
+显示时区优先级是：显式配置 > 有效 OS 时区 identity > UTC 回退。Windows 默认使用系统
+时区名称和系统规则；覆盖时使用 IANA identity 与 ZoneInfo/tzdata 规则。
+先用 `config set timezone.name '"Europe/Berlin"'` 设置名称，再将 `timezone.mode`
+设为 `"explicit"`；设回 `"system"` 就恢复操作系统默认值。迁移会补齐新字段，保留已有授权。
+换算未来时刻使用那个时刻的 DST 规则，不使用当前固定 offset。
+
+启动诊断包含系统 UTC、OS 时区和本地时间；额度刷新取得可信 HTTPS Date 后，才有外部
+UTC 和偏差验证。没有外部参考时显示 UNVERIFIED。严重偏差报告 CLOCK_SKEW 并阻止启动
+和调度；可检测的墙钟/时区/UTC 不自洽报告 TIMEZONE_OR_CLOCK_MISCONFIGURED。
+如果错误时区配上被人为调整的时钟，系统内部可能仍自洽：此时只能发现外部 UTC 偏差，
+无法推断用户本来想用哪个时区。请修正 OS 时钟/时区或显式显示配置，Bridge 不猜地理位置，
+不用 IP 定位，也不替用户偷偷改系统设置。
+
+“每天当地 09:00”应保存时区、当地时间和周期规则，每次重新按 DST 规则计算下一次 UTC。
+`cc_time.next_local_occurrence` 提供这种换算：跳过不存在的当地时刻，重复时刻只取第一次。
+这是转换函数，不是新增周期任务服务；宿主负责保存规则并调度。绝对/相对一次性任务的
+触发瞬间不受显示时区和 DST 改变影响。

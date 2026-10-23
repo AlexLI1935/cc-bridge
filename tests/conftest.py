@@ -45,7 +45,7 @@ payload = {"type": "result", "subtype": "success", "is_error": False,
            "session_id": "12345678-1234-1234-1234-123456789abc",
            "result": "Review completed"}
 if action == "write":
-    assert args[args.index("--permission-mode") + 1] == "acceptEdits"
+    assert args[args.index("--permission-mode") + 1] == "dontAsk"
     Path("changed.txt").write_text("authorized change", encoding="utf-8")
     payload["result"] = "Changed changed.txt"
 if action == "limit":

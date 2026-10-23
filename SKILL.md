@@ -3,7 +3,7 @@ name: cc-bridge
 description: Deploy and operate CC Bridge to delegate repository review, debugging and implementation tasks to a local Claude Code CLI through MCP or CLI, with persisted usage ceilings, authorized workspaces, reset recovery and completion events. Use when Claude Code is the selected backend; skip ordinary explanations requiring no external coding agent.
 license: MIT
 metadata:
-  version: "1.1.1"
+  version: "1.1.2"
   author: Alex Li
   homepage: https://github.com/AlexLI1935
   repository: https://github.com/AlexLI1935/cc-bridge
@@ -92,7 +92,7 @@ single-task lock. Remembering this skill is not the safety boundary.
 - UNKNOWN, STALE, AUTH_REQUIRED, AUTH_STALE, ENDPOINT_ERROR and CLOCK_SKEW do not
   authorize starting work. Explain the reason; never infer availability.
 - `read_only` exposes Read/Glob/Grep in plan mode. It cannot execute tests.
-- `write` uses acceptEdits, retains Claude's permission checks and requires an
+- `write` uses dontAsk with pre-approved coding tools and requires an
   explicitly trusted root. Use `trust-workspace <absolute-root> --yes` only within
   user authorization. Revoke via `revoke-workspace`; do not trust arbitrary disks.
 - Workdir policy and tool restrictions are not an OS sandbox. Use trusted repositories.
@@ -197,3 +197,53 @@ See [README.md](README.md), [中文说明](README.zh-CN.md) and
 [config.example.json](config.example.json). Windows offline behavior and scheduler
 XML are tested; real-account/live-model execution and OS wakeups are not part of
 the offline suite. Linux/macOS are not officially verified.
+
+## Headless coding and compatibility
+
+Approving a workspace lets write tasks read, edit and run ordinary development
+commands without a person approving each command. Write mode uses `dontAsk` with
+`--allowedTools Read Glob Grep Edit Write NotebookEdit Bash`, and omits `--tools`.
+Anything requiring approval outside those grants is denied. There is no automatic
+bypass mode. Deployment, remote pushes and system changes remain outside the task
+contract. Broad Bash authorization is not an OS sandbox or a directory confinement
+guarantee; only trust projects and instructions you intend to execute.
+
+Read-only retains the Read/Glob/Grep tool set and cannot execute Bash or edit.
+Managed/user deny rules still take precedence; report denials rather than changing
+global permissions. `environment` reports the actual installed Claude CLI version.
+Windows CLI 2.1.286 was tested: Bash remained visible in a clean `--tools` comparison,
+so the reported disappearance was not reproduced as a universal version defect.
+Write avoids that option for compatibility. `acceptEdits` without Bash grants did
+not provide the required unattended command contract. No fragile exact-version block
+is imposed. See [permissions](https://code.claude.com/docs/en/permissions) and
+[CLI reference](https://code.claude.com/docs/en/cli-reference).
+
+## Time model
+
+UTC/epoch is the absolute truth for reset instants, cache age, cooldown and one-shot
+wakeups. Relative requests such as “in five hours” mean `now_epoch + 18000`;
+running task timeouts use a monotonic clock, so wall-clock adjustments cannot extend
+the timeout. API reset timestamps remain authoritative for quota recovery.
+
+Effective display timezone: explicit config > valid OS identity > UTC fallback.
+The native Windows identity uses OS rules; explicit overrides use IANA ZoneInfo
+rules (`tzdata` is included in MCP requirements). For example, set `timezone.name`
+to an IANA identity, then `timezone.mode` to `explicit`; return to `system` for the
+OS default. Existing configs migrate the new nullable name without losing consent.
+Future conversions use the target instant's DST rules, not today's offset.
+
+System UTC, OS identity and local time are reported at startup; external UTC and
+clock skew become verified on usage refresh when its HTTPS Date is available.
+Without an external reference the diagnostic is UNVERIFIED, not evidence of correct
+clock time. CLOCK_SKEW blocks starts/scheduling. Mechanically inconsistent OS local
+time/identity/UTC reports TIMEZONE_OR_CLOCK_MISCONFIGURED. A wrong label plus an
+adjusted clock may be internally consistent: external UTC reveals skew but cannot
+reveal the intended timezone. Correct the OS clock/timezone or explicit display
+config; the bridge never guesses geography, uses IP geolocation, or changes the OS.
+
+Local recurring rules must retain timezone + local hour/minute + daily/weekly rule
+and resolve each occurrence to UTC again. `cc_time.next_local_occurrence` supplies
+this conversion: skipped DST times are skipped; repeated times use the first fold
+once. It does not add a recurring job service to the bridge. Hosts persisting such
+rules remain responsible for scheduling each occurrence. Absolute and relative
+one-shot instants never change with DST or a display timezone override.

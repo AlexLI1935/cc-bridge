@@ -15,7 +15,7 @@ def defaults() -> dict[str, Any]:
             "weekly": {"max_utilization_pct": 95, "auto_wait_for_reset": True, "auto_resume_after_reset": True},
             "refresh_interval_minutes": 5, "fresh_seconds": 300, "reset_grace_seconds": 60,
             "allow_cli_refresh_probe": False},
-        "timezone": {"mode": "system", "detected_name": None, "detected_at": None, "last_offset": None},
+        "timezone": {"mode": "system", "name": None, "detected_name": None, "detected_at": None, "last_offset": None},
         "clock": {"max_skew_seconds": 300, "last_check": None},
         "reset_scheduler": {"enabled": True, "backend": "system", "retry_seconds": 300},
         "workspace": {"trusted_roots": []}}
@@ -52,7 +52,16 @@ def validate(config: Any) -> dict[str, Any]:
     number(config["clock"]["max_skew_seconds"], 30, 3600)
     number(config["reset_scheduler"]["retry_seconds"], 30, 86400)
     auth = u["authorization"]
-    if auth["scope"] != "claude_subscription_usage" or config["timezone"]["mode"] != "system":
+    if auth["scope"] != "claude_subscription_usage" or config["timezone"]["mode"] not in ("system", "explicit"):
+        fail()
+    zone = config["timezone"]["name"]
+    if zone is not None:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(zone)
+        except (KeyError, ValueError, TypeError):
+            fail()
+    if config["timezone"]["mode"] == "explicit" and not zone:
         fail()
     if config["reset_scheduler"]["backend"] not in ("system", "caller_polling"):
         fail()
@@ -81,6 +90,8 @@ def _upgrade_persisted(config: Any) -> Any:
     """Tighten legacy cache lifetime without losing consent or workspace settings."""
     candidate = copy.deepcopy(config)
     if isinstance(candidate, dict) and candidate.get("schema_version") == 1:
+        if isinstance(candidate.get("timezone"), dict):
+            candidate["timezone"].setdefault("name", None)
         usage = candidate.get("usage")
         if isinstance(usage, dict):
             lifetime = usage.get("fresh_seconds")
@@ -120,7 +131,8 @@ class ConfigStore:
 
     def detect_timezone(self) -> dict[str, Any]:
         from cc_governance import timezone_info
-        info = timezone_info()
+        zone = self.load()["timezone"]
+        info = timezone_info(zone["name"]) if zone["mode"] == "explicit" else timezone_info()
         def change(c: dict[str, Any]) -> None:
             c["timezone"].update(detected_name=info["local_timezone"], detected_at=info["timezone_checked_at"],
                                  last_offset=info["local_utc_offset_now"])
@@ -133,7 +145,7 @@ class ConfigStore:
         # Consent and workspace trust use dedicated explicit-approval commands.
         if not (dotted.startswith("usage.five_hour.") or dotted.startswith("usage.weekly.") or dotted in (
                 "usage.enabled", "usage.refresh_interval_minutes", "usage.fresh_seconds", "usage.reset_grace_seconds",
-                "usage.allow_cli_refresh_probe", "timezone.mode", "clock.max_skew_seconds",
+                "usage.allow_cli_refresh_probe", "timezone.mode", "timezone.name", "clock.max_skew_seconds",
                 "reset_scheduler.enabled", "reset_scheduler.backend", "reset_scheduler.retry_seconds")):
             raise BridgeError("Use usage-authorize/revoke or trust-workspace/revoke-workspace for authorization changes")
         def change(c: dict[str, Any]) -> None:

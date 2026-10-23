@@ -42,5 +42,5 @@ def test_permission_surface(bridge, project):
     assert "--add-dir" not in command
     task["mode"] = "write"
     command = build_command(task)
-    assert command[command.index("--permission-mode") + 1] == "acceptEdits"
+    assert command[command.index("--permission-mode") + 1] == "dontAsk"
     assert not any("bypass" in item.lower() for item in command)

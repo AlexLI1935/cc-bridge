@@ -32,12 +32,15 @@ def instant(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def local_time(epoch: float) -> str:
+def local_time(epoch: float, zone: str | None = None) -> str:
     # Convert at the target instant, not using today's fixed UTC offset.
+    if zone:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(epoch, ZoneInfo(zone)).isoformat()
     return datetime.fromtimestamp(epoch, timezone.utc).astimezone().isoformat()
 
 
-def timezone_info() -> dict[str, Any]:
+def timezone_info(override: str | None = None) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     name = None
     if os.name == "nt":
@@ -54,18 +57,35 @@ def timezone_info() -> dict[str, Any]:
             name = link.split("/zoneinfo/", 1)[1]
         elif Path("/etc/timezone").is_file():
             name = Path("/etc/timezone").read_text().strip()
-    local = now.astimezone()
-    return {"local_timezone": name or "system-local-rules", "local_utc_offset_now": local.strftime("%z"),
+    if name and os.name != "nt":
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(name)
+        except (KeyError, ValueError):
+            name = None
+    os_name = name
+    if override:
+        from zoneinfo import ZoneInfo
+        local = now.astimezone(ZoneInfo(override))
+        name = override
+    elif name:
+        local = now.astimezone()
+    else:
+        name = "UTC"
+        local = now
+    from cc_time import clock_diagnostic
+    diagnostic = clock_diagnostic(now, now.astimezone() if os_name else now, os_name or "UTC", None)
+    return {"os_timezone": os_name, "timezone_source": "explicit" if override else "system" if os_name else "utc_fallback", "clock_diagnostic": diagnostic, "local_timezone": name, "local_utc_offset_now": local.strftime("%z"),
             "timezone_checked_at": now.isoformat(), "system_utc_time": now.isoformat(),
             "system_local_time": local.isoformat()}
 
 
-def reset_fields(value: Any) -> dict[str, Any]:
+def reset_fields(value: Any, zone: str | None = None) -> dict[str, Any]:
     if not isinstance(value, str) or len(value) > 128:
         raise ValueError("Missing reset timestamp")
     dt = instant(value)
     return {"resets_at_raw": value, "resets_at_utc": dt.isoformat(), "resets_at_epoch": dt.timestamp(),
-            "resets_at_local": local_time(dt.timestamp())}
+            "resets_at_local": local_time(dt.timestamp(), zone)}
 
 
 def _validated_percentage(value: Any, label: str) -> float:
@@ -125,7 +145,7 @@ def register_wakeup(bridge: Any, epoch: float) -> dict[str, Any]:
     task = ET.Element("{"+ns+"}Task", version="1.2")
     triggers = node(task,"Triggers")
     trigger = node(triggers,"TimeTrigger")
-    node(trigger,"StartBoundary",local_time(max(epoch,time.time()+5)))
+    node(trigger,"StartBoundary",bridge.governance.local_display(max(epoch,time.time()+5)))
     node(trigger,"Enabled","true")
     settings = node(task,"Settings")
     node(settings,"MultipleInstancesPolicy","IgnoreNew")
@@ -171,6 +191,10 @@ class Governance:
     def _save(self, name: str, value: dict[str, Any]) -> None:
         from cc_bridge import write_json_atomic
         write_json_atomic(self.root / name, value)
+
+    def local_display(self, epoch: float) -> str:
+        zone = self.config.load()["timezone"]
+        return local_time(epoch, zone["name"] if zone["mode"] == "explicit" else "UTC" if zone["detected_name"] == "UTC" else None)
 
     def policy(self) -> dict[str, Any]:
         c = self.config.load()
@@ -267,6 +291,9 @@ class Governance:
                     for key in ("five_hour", "weekly")):
                 # A snapshot from before a reset cannot verify availability after it.
                 data.update(state="STALE", stale=True, current_known=False)
+            for key in ("five_hour", "weekly"):
+                if isinstance(data.get(key), dict) and data[key].get("resets_at_epoch") is not None:
+                    data[key]["resets_at_local"] = self.local_display(data[key]["resets_at_epoch"])
             return data
         except (BridgeError, ValueError, TypeError):
             return {"state": "UNKNOWN", "stale": True, "current_known": False, "last_error": "Usage cache unavailable"}
@@ -315,14 +342,22 @@ class Governance:
                         for key, source in (("five_hour", "five_hour"), ("weekly", "seven_day")):
                             used = _validated_percentage(raw[source]["utilization"], key)
                             windows[key] = {"utilization": used, "remaining": round(100 - used, 2),
-                                            **reset_fields(raw[source]["resets_at"])}
+                                            **reset_fields(raw[source]["resets_at"], self.config.load()["timezone"]["name"] if self.config.load()["timezone"]["mode"] == "explicit" else None)}
+                        external = None
                         skew = None
                         if server_date:
                             server_dt = parsedate_to_datetime(server_date)
                             if server_dt.tzinfo is None:
                                 raise ValueError("Invalid server date")
+                            external = server_dt
                             skew = round(time.time() - server_dt.timestamp(), 2)
-                        if skew is not None and abs(skew) > self.policy()["clock_skew_seconds"]:
+                        from cc_time import clock_diagnostic
+                        now = datetime.now(timezone.utc)
+                        diagnosis = clock_diagnostic(now, now.astimezone(), data["timezone"].get("os_timezone") or data["timezone"]["local_timezone"], external, self.policy()["clock_skew_seconds"])
+                        data["clock_diagnostic"] = diagnosis
+                        if diagnosis["status"] == "TIMEZONE_OR_CLOCK_MISCONFIGURED":
+                            data.update(state="TIMEZONE_OR_CLOCK_MISCONFIGURED", auth_state="VALID", last_error="OS local time and timezone are inconsistent; correct system configuration")
+                        elif skew is not None and abs(skew) > self.policy()["clock_skew_seconds"]:
                             data.update(state="CLOCK_SKEW", auth_state="VALID", clock_skew_seconds=skew,
                                         last_error="System clock differs significantly from the HTTPS server date")
                         else:
@@ -456,7 +491,7 @@ class Governance:
                 record = read_json(path)
                 if record.get("status") == "WAITING_USAGE_RESET" and record.get("reset_epoch"):
                     waiting = True
-                    new_local = local_time(record["reset_epoch"])
+                    new_local = self.local_display(record["reset_epoch"])
                     new_zone = usage["timezone"]["local_timezone"]
                     changed |= record.get("reset_local") != new_local or record.get("local_timezone") != new_zone
                     record.update(reset_local=new_local, local_timezone=new_zone)
@@ -556,7 +591,7 @@ class Governance:
                 blocked_by=blocked[0] if len(blocked) == 1 else "multiple", blocked_windows=blocked,
                 blocked_at=utc_iso(), last_usage=data, reset_epoch=epoch,
                 reset_utc=datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
-                reset_local=local_time(epoch), local_timezone=timezone_info()["local_timezone"],
+                reset_local=self.local_display(epoch), local_timezone=self.config.detect_timezone()["local_timezone"],
                 next_check_epoch=due, auto_wait=auto_wait, auto_resume=auto_resume,
                 waiting_before_launch=before_launch or record.get("waiting_before_launch", False),
                 wait_cycle=cycle, continuation=continuation or record.get("continuation"),
@@ -573,8 +608,8 @@ class Governance:
 
     def _arm_scheduler(self) -> dict[str, Any]:
         from cc_bridge import read_json
-        if self._load("usage.json").get("state") == "CLOCK_SKEW":
-            return {"delivery": "blocked", "scheduled": False, "last_error": "CLOCK_SKEW"}
+        if self._load("usage.json").get("state") in ("CLOCK_SKEW", "TIMEZONE_OR_CLOCK_MISCONFIGURED"):
+            return {"delivery": "blocked", "scheduled": False, "last_error": self._load("usage.json").get("state")}
         config = self.config.load()
         rows = [read_json(p) for p in self.bridge.results.glob("*/result.json")]
         due = [r["next_check_epoch"] for r in rows if r.get("status") == "WAITING_USAGE_RESET"

@@ -26,7 +26,7 @@ from typing import Any
 if __name__ == "__main__":
     sys.modules.setdefault("cc_bridge", sys.modules[__name__])
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 SCHEMA_VERSION = 1
 MODES = ("read_only", "write")
 EFFORTS = ("low", "medium", "high")
@@ -219,6 +219,17 @@ def build_claude_env(task: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+def claude_diagnostic() -> dict[str, Any]:
+    """Read the installed CLI version without starting a model request."""
+    try:
+        proc = subprocess.run([str(discover_claude_exe()), "--version"], capture_output=True,
+                              timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        match = re.match(r"(\d+\.\d+\.\d+)", proc.stdout.decode("utf-8", errors="replace").strip())
+        return {"available": proc.returncode == 0 and bool(match), "version": match.group(1) if match else None}
+    except (BridgeError, OSError, subprocess.SubprocessError):
+        return {"available": False, "version": None}
+
+
 def build_command(task: dict[str, Any], resume_session_id: str | None = None) -> list[str]:
     """Use tool availability as well as permission modes; never bypass permissions."""
     cmd = [str(discover_claude_exe()), "-p", "Follow the task instructions supplied on stdin.",
@@ -234,7 +245,8 @@ def build_command(task: dict[str, Any], resume_session_id: str | None = None) ->
     if task["mode"] == "read_only":
         cmd += ["--permission-mode", "plan", "--tools", "Read,Glob,Grep"]
     else:
-        cmd += ["--permission-mode", "acceptEdits", "--tools", "Read,Glob,Grep,Edit,Write,NotebookEdit,Bash"]
+        cmd += ["--permission-mode", "dontAsk", "--allowedTools",
+                "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash"]
     return cmd
 
 
@@ -706,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
             result = gov.verify_reminders(args.task_id)
         elif args.command == "environment":
             from cc_governance import timezone_info
-            result = {"success": True, "home": str(bridge.home), **timezone_info()}
+            result = {"success": True, "home": str(bridge.home), "claude_cli": claude_diagnostic(), **gov.config.detect_timezone()}
         elif args.command == "new":
             result = bridge.create_task(args.goal, args.workdir, Path(args.prompt_file).read_text(encoding="utf-8-sig"),
                                         mode=args.mode, complexity=args.complexity, model=args.model, effort=args.effort,
